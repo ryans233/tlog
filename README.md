@@ -2,6 +2,10 @@
 
 A terminal-based Android logcat viewer written in Rust.
 
+[English](README.md) | [中文](README_ZH.md)
+
+<img width="906" height="593" alt="image" src="https://github.com/user-attachments/assets/8777e329-fecb-4a17-94ce-fd2c06c57a68" />
+
 ## Features
 
 - **Real-time log stream** — reads and parses `adb logcat -v threadtime` output
