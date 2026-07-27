@@ -91,16 +91,32 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
     let stdout = child.stdout.take().expect("stdout should be piped");
 
     tokio::spawn(async move {
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
+        let mut reader = BufReader::new(stdout);
+        let mut buf: Vec<u8> = Vec::new();
         let mut local_dropped: u64 = 0;
+        use std::io::Write;
+        let log_line = |msg: &str| {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true).append(true).open("tlog-rejected.log")
+            {
+                let _ = writeln!(f, "[tlog] {}", msg);
+            }
+        };
         let mut last_reported_dropped: u64 = 0;
 
         loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => {
+                    let _ = log_line("logcat reader: EOF (adb process exited)");
+                    let _ = tx.send(Message::LogcatDied).await;
+                    break;
+                }
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
+                    let line = line.trim_end_matches(|c| c == '\n' || c == '\r');
                     // Try parsing as a log entry
-                    if let Some(entry) = parse_line(&line) {
+                    if let Some(entry) = parse_line(line) {
                         // Check for ActivityManager lifecycle events
                         if entry.tag == "ActivityManager"
                             && let Some(event) = logcat::parse_lifecycle(&entry.tag, &entry.message)
@@ -119,7 +135,6 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
                             Ok(()) => {}
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                 local_dropped += 1;
-                                // Report dropped count periodically
                                 if local_dropped - last_reported_dropped >= 1000 {
                                     let _ = tx.try_send(Message::Dropped(local_dropped));
                                     last_reported_dropped = local_dropped;
@@ -129,14 +144,21 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
                                 break;
                             }
                         }
+                    } else {
+                        // Line didn't match expected format — append to rejected log.
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true).append(true).open("tlog-rejected.log")
+                        {
+                            if line.len() > 200 {
+                                let _ = writeln!(f, "[unparsed len={}] {}...", line.len(), &line[..200]);
+                            } else {
+                                let _ = writeln!(f, "{}", line);
+                            }
+                        }
                     }
                 }
-                Ok(None) => {
-                    // EOF
-                    let _ = tx.send(Message::LogcatDied).await;
-                    break;
-                }
-                Err(_) => {
+                Err(e) => {
+                    let _ = log_line(&format!("logcat reader: read error: {}", e));
                     let _ = tx.send(Message::LogcatDied).await;
                     break;
                 }

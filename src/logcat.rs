@@ -196,7 +196,7 @@ pub fn parse_line(line: &str) -> Option<LogEntry> {
     if bytes.len() < 18 || !bytes[15].is_ascii_digit() || !bytes[16].is_ascii_digit() || !bytes[17].is_ascii_digit() {
         return None;
     }
-    let ms: u32 = ((bytes[15] - b'0') * 100 + (bytes[16] - b'0') * 10 + (bytes[17] - b'0')) as u32;
+    let ms: u32 = (bytes[15] - b'0') as u32 * 100 + (bytes[16] - b'0') as u32 * 10 + (bytes[17] - b'0') as u32;
 
     // Check space at pos 18
     if bytes.get(18)? != &b' ' {
