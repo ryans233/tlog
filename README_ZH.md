@@ -2,6 +2,10 @@
 
 用 Rust 写的终端 Android logcat 查看器。
 
+[English](README.md) | [中文](README_ZH.md)
+
+<img width="906" height="593" alt="image" src="https://github.com/user-attachments/assets/8777e329-fecb-4a17-94ce-fd2c06c57a68" />
+
 ## 功能
 
 - **实时日志流** — 通过 `adb logcat -v threadtime` 读取并解析日志
