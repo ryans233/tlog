@@ -13,16 +13,37 @@ use crate::viewport::ViewportFrame;
 
 // ── Main render ──────────────────────────────────────────────────────────────
 
-/// Render the bottom viewport: filter bar with embedded status.
+/// Render the bottom viewport: filter bar with embedded status,
+/// and optionally the help/options overlay above it.
 ///
-/// The viewport covers only the bottom 2 rows:
-/// - Row 0: Filter input bar with status info in the border title
-/// - Row 1: Filter error (only when present)
+/// The viewport area layout (bottom to top):
+/// - Filter input bar with status info in the border title (1 row + borders)
+/// - Filter error (1 row, only when present)
+/// - Help/Options overlay (N rows, only when toggled via h/o)
 pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
     let area = f.area();
+    let overlay_rows = app.overlay_rows();
     let is_focused = app.focus == Focus::FilterInput;
 
-    // Build status string
+    // Split area: overlay on top, filter bar on bottom
+    let filter_area = Rect {
+        x: area.x,
+        y: area.y + overlay_rows,
+        width: area.width,
+        height: area.height.saturating_sub(overlay_rows),
+    };
+
+    // Render overlay if shown
+    if overlay_rows > 0 {
+        let overlay_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: overlay_rows,
+        };
+        render_overlay(f, app, overlay_area);
+    }
+
     // Build status string
     let msgs = app.msgs;
     let status = msgs.status_bar(
@@ -39,8 +60,8 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
             Style::default().fg(Color::DarkGray)
         })
         .title(msgs.filter_title(&status));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = block.inner(filter_area);
+    f.render_widget(block, filter_area);
 
     // Render filter input text
     let prompt = if is_focused { "> " } else { "  " };
@@ -57,14 +78,14 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
         f.set_cursor_position((rel_cx, rel_cy));
     }
 
-    // Filter error below input (absolute screen coordinates — buffer handles offset).
+    // Filter error below input
     if let Some(ref err) = app.filter_error
-        && area.height > 1
+        && filter_area.height > 1
     {
         let error_area = Rect {
-            x: area.x + 1,
+            x: filter_area.x + 1,
             y: inner.y + inner.height,
-            width: area.width.saturating_sub(2),
+            width: filter_area.width.saturating_sub(2),
             height: 1,
         };
         let error_text = Span::styled(
@@ -178,4 +199,154 @@ fn truncate_line(s: &str, max_chars: usize) -> String {
     } else {
         s.chars().take(max_chars).collect::<String>() + "..."
     }
+}
+
+// ── Help / Options overlay ───────────────────────────────────────────────────
+
+fn help_lines(msgs: &crate::i18n::Messages) -> Vec<Line<'static>> {
+    let header = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(Color::Cyan);
+    let desc = Style::default();
+
+    vec![
+        Line::from(Span::styled(msgs.help_title, header)),
+        Line::from(vec![
+            Span::styled("  q / Ctrl+C  ", key_style),
+            Span::styled(msgs.help_quit, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  h           ", key_style),
+            Span::styled(msgs.help_show_help, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  p / Space   ", key_style),
+            Span::styled(msgs.help_pause, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  C           ", key_style),
+            Span::styled(msgs.help_clear, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  o           ", key_style),
+            Span::styled(msgs.help_options, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  g           ", key_style),
+            Span::styled(msgs.help_bypass, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab         ", key_style),
+            Span::styled(msgs.help_tab, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc         ", key_style),
+            Span::styled(msgs.help_esc, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  1-6         ", key_style),
+            Span::styled(msgs.help_display_opts, desc),
+        ]),
+        Line::default(),
+    ]
+}
+
+fn options_lines(app: &App) -> Vec<Line<'static>> {
+    let msgs = app.msgs;
+    let header = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    fn status_label<'a>(enabled: bool, msgs: &'a crate::i18n::Messages) -> &'a str {
+        if enabled { msgs.on_label } else { msgs.off_label }
+    }
+    fn style_for(enabled: bool) -> Style {
+        if enabled {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        }
+    }
+
+    vec![
+        Line::from(Span::styled(msgs.opts_title, header)),
+        Line::from(vec![
+            Span::styled("  [1] ", key_style),
+            Span::styled(msgs.opts_timestamp, key_style),
+            Span::styled(": ", key_style),
+            Span::styled(
+                status_label(app.config.show_timestamp, msgs),
+                style_for(app.config.show_timestamp),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  [2] ", key_style),
+            Span::styled(msgs.opts_pid, key_style),
+            Span::styled(":    ", key_style),
+            Span::styled(
+                status_label(app.config.show_pid, msgs),
+                style_for(app.config.show_pid),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  [3] ", key_style),
+            Span::styled(msgs.opts_tid, key_style),
+            Span::styled(":    ", key_style),
+            Span::styled(
+                status_label(app.config.show_tid, msgs),
+                style_for(app.config.show_tid),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  [4] ", key_style),
+            Span::styled(msgs.opts_tag, key_style),
+            Span::styled(":    ", key_style),
+            Span::styled(
+                status_label(app.config.show_tag, msgs),
+                style_for(app.config.show_tag),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  [5] ", key_style),
+            Span::styled(msgs.opts_level, key_style),
+            Span::styled(":   ", key_style),
+            Span::styled(
+                status_label(app.config.show_level, msgs),
+                style_for(app.config.show_level),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  [6] ", key_style),
+            Span::styled(msgs.opts_color, key_style),
+            Span::styled(":   ", key_style),
+            Span::styled(
+                status_label(app.config.colorize, msgs),
+                style_for(app.config.colorize),
+            ),
+        ]),
+        Line::default(),
+    ]
+}
+
+/// Render the help or options overlay in the given area.
+fn render_overlay(f: &mut ViewportFrame, app: &App, area: Rect) {
+    let lines: Vec<Line<'static>> = if app.show_help {
+        help_lines(app.msgs)
+    } else if app.show_options {
+        options_lines(app)
+    } else {
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::LEFT | Borders::RIGHT)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let text = Paragraph::new(lines);
+    f.render_widget(text, inner);
 }

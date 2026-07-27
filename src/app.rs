@@ -50,6 +50,10 @@ pub struct App {
     pub needs_replay: bool,
     /// When true, the active filter is temporarily disabled (g key toggle).
     pub filter_bypassed: bool,
+    /// When true, the help overlay (h key) is shown between filter and log area.
+    pub show_help: bool,
+    /// When true, the options overlay (o key) is shown between filter and log area.
+    pub show_options: bool,
     /// Localised messages.
     pub msgs: &'static crate::i18n::Messages,
 }
@@ -69,6 +73,8 @@ impl App {
             pending_log_lines: Vec::new(),
             needs_replay: false,
             filter_bypassed: false,
+            show_help: false,
+            show_options: false,
             msgs: crate::i18n::messages(lang),
         }
     }
@@ -154,5 +160,21 @@ impl App {
             '6' => self.config.colorize = !self.config.colorize,
             _ => {}
         }
+    }
+
+    /// Number of overlay rows to show above the filter bar (0 if none).
+    pub fn overlay_rows(&self) -> u16 {
+        if self.show_help {
+            12 // title + 10 keybindings + blank line
+        } else if self.show_options {
+            9 // title + 7 configs + blank line
+        } else {
+            0
+        }
+    }
+
+    /// Total viewport height including filter bar and overlay.
+    pub fn viewport_height(&self) -> u16 {
+        3 + self.overlay_rows()
     }
 }

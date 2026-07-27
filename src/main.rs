@@ -247,7 +247,8 @@ async fn run_app(
                         }
                     }
                     Event::Resize(cols, rows) => {
-                        let new_area = Rect::new(0, rows.saturating_sub(VIEWPORT_HEIGHT), cols, VIEWPORT_HEIGHT);
+                        let vh = app.viewport_height();
+                        let new_area = Rect::new(0, rows.saturating_sub(vh), cols, vh);
                         terminal.clear_scrollback_and_visible_screen_ansi()?;
                         terminal.set_viewport_area(new_area);
                         replay_filtered(terminal, &app)?;
@@ -275,17 +276,17 @@ async fn run_app(
                 app.dispatch(Message::Tick);
             }
         }
-
         // Handle filter change: clear scrollback and replay.
         if app.needs_replay {
             terminal.clear_scrollback_and_visible_screen_ansi()?;
             // Recompute viewport position after clear.
             let size = terminal.size()?;
+            let vh = app.viewport_height();
             terminal.set_viewport_area(Rect::new(
                 0,
-                size.height.saturating_sub(VIEWPORT_HEIGHT),
+                size.height.saturating_sub(vh),
                 size.width,
-                VIEWPORT_HEIGHT,
+                vh,
             ));
             replay_filtered(terminal, &app)?;
             app.needs_replay = false;
@@ -376,13 +377,17 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Char('4') => app.toggle_config('4'),
         KeyCode::Char('5') => app.toggle_config('5'),
         KeyCode::Char('6') => app.toggle_config('6'),
-        // Options: show display config status
+        // Options overlay: toggle display config status
         KeyCode::Char('o') => {
-            app.pending_log_lines.extend(options_lines(app));
+            app.show_options = !app.show_options;
+            app.show_help = false;
+            app.needs_replay = true;
         }
-        // Help: print keybindings to scrollback
+        // Help overlay: toggle keybindings
         KeyCode::Char('h') => {
-            app.pending_log_lines.extend(help_lines(app.msgs));
+            app.show_help = !app.show_help;
+            app.show_options = false;
+            app.needs_replay = true;
         }
         _ => {}
     }
@@ -420,140 +425,4 @@ fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
         _ => {}
     }
     true
-}
-
-// ── Helpers for h / o keys ──────────────────────────────────────────────────
-
-fn help_lines(msgs: &crate::i18n::Messages) -> Vec<ratatui::text::Line<'static>> {
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
-
-    let header = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let key_style = Style::default().fg(Color::Cyan);
-    let desc = Style::default();
-
-    vec![
-        Line::from(Span::styled(msgs.help_title, header)),
-        Line::from(vec![
-            Span::styled("  q / Ctrl+C  ", key_style),
-            Span::styled(msgs.help_quit, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  h           ", key_style),
-            Span::styled(msgs.help_show_help, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  p / Space   ", key_style),
-            Span::styled(msgs.help_pause, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  C           ", key_style),
-            Span::styled(msgs.help_clear, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  o           ", key_style),
-            Span::styled(msgs.help_options, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  g           ", key_style),
-            Span::styled(msgs.help_bypass, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  Tab         ", key_style),
-            Span::styled(msgs.help_tab, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  Esc         ", key_style),
-            Span::styled(msgs.help_esc, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  1-6         ", key_style),
-            Span::styled(msgs.help_display_opts, desc),
-        ]),
-        Line::default(),
-    ]
-}
-
-fn options_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
-    use ratatui::style::{Color, Modifier, Style};
-    use ratatui::text::{Line, Span};
-
-    let msgs = app.msgs;
-    let header = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let key_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    fn status_label<'a>(enabled: bool, msgs: &'a crate::i18n::Messages) -> &'a str {
-        if enabled { msgs.on_label } else { msgs.off_label }
-    }
-    fn style_for(enabled: bool) -> Style {
-        if enabled {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        }
-    }
-
-    vec![
-        Line::from(Span::styled(msgs.opts_title, header)),
-        Line::from(vec![
-            Span::styled("  [1] ", key_style),
-            Span::styled(msgs.opts_timestamp, key_style),
-            Span::styled(": ", key_style),
-            Span::styled(
-                status_label(app.config.show_timestamp, msgs),
-                style_for(app.config.show_timestamp),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  [2] ", key_style),
-            Span::styled(msgs.opts_pid, key_style),
-            Span::styled(":    ", key_style),
-            Span::styled(
-                status_label(app.config.show_pid, msgs),
-                style_for(app.config.show_pid),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  [3] ", key_style),
-            Span::styled(msgs.opts_tid, key_style),
-            Span::styled(":    ", key_style),
-            Span::styled(
-                status_label(app.config.show_tid, msgs),
-                style_for(app.config.show_tid),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  [4] ", key_style),
-            Span::styled(msgs.opts_tag, key_style),
-            Span::styled(":    ", key_style),
-            Span::styled(
-                status_label(app.config.show_tag, msgs),
-                style_for(app.config.show_tag),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  [5] ", key_style),
-            Span::styled(msgs.opts_level, key_style),
-            Span::styled(":   ", key_style),
-            Span::styled(
-                status_label(app.config.show_level, msgs),
-                style_for(app.config.show_level),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  [6] ", key_style),
-            Span::styled(msgs.opts_color, key_style),
-            Span::styled(":   ", key_style),
-            Span::styled(
-                status_label(app.config.colorize, msgs),
-                style_for(app.config.colorize),
-            ),
-        ]),
-        Line::default(),
-    ]
 }
