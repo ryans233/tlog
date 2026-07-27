@@ -1,0 +1,54 @@
+// Pest grammar for Android Studio logcat query syntax.
+
+WHITESPACE = _{ " " | "\t" }
+
+// Top-level: alternation of AND groups separated by |
+query = { SOI ~ or_expr ~ EOI }
+
+or_expr = { and_expr ~ ("|" ~ and_expr)* }
+
+and_expr = { not_expr ~ (("&" ~ not_expr) | not_expr)* }
+
+not_expr = {
+    term
+    | "-" ~ term
+    | "-" ~ "(" ~ or_expr ~ ")"
+}
+
+term = {
+    "(" ~ or_expr ~ ")"
+    | predicate
+    | bare_word
+}
+
+// Key:value predicates
+predicate = {
+    key ~ regex_modifier? ~ ":" ~ quoted_value
+}
+
+// Keys
+key = @{
+    "tag"
+    | "package"
+    | "process"
+    | "message"
+    | "level"
+    | "age"
+    | "is"
+    | "name"
+}
+
+regex_modifier = { "~" }
+
+// Values: either a quoted string or an unquoted word (no spaces, no special chars)
+quoted_value = {
+    unquoted_value
+    | "\"" ~ quoted_inner ~ "\""
+}
+
+quoted_inner = @{ (!("\"") ~ ANY)* }
+
+unquoted_value = @{ (!(WHITESPACE | "|" | "&" | "(" | ")" | "\"" | "-" | ":") ~ ANY)+ }
+
+// Bare words (no key) — match against message field
+bare_word = @{ unquoted_value }

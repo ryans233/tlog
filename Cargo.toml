@@ -1,0 +1,17 @@
+[package]
+name = "tlog"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+pest = "2"
+pest_derive = "2"
+chrono = "0.4"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
+futures = "0.3"
+which = "7"
