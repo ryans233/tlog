@@ -174,7 +174,7 @@ pub fn format_entry(entry: &LogEntry, config: &DisplayConfig) -> Line<'static> {
     };
 
     spans.push(Span::styled(
-        truncate_line(&entry.message, 512),
+        entry.message.clone(),
         msg_style,
     ));
 
@@ -192,14 +192,6 @@ fn level_style(level: LogLevel) -> Style {
     }
 }
 
-/// Truncate a string to at most `max_chars` characters on a valid UTF-8 boundary.
-fn truncate_line(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        s.chars().take(max_chars).collect::<String>() + "..."
-    }
-}
 
 // ── Help / Options overlay ───────────────────────────────────────────────────
 
