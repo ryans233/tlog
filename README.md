@@ -57,12 +57,21 @@ tlog --lang zh
 | `p` / `Space` | Toggle pause/resume |
 | `C` | Clear log buffer |
 | `g` | Toggle filter bypass (keeps input, press again to restore) |
-| `o` | Print display config to scrollback |
+| `o` | Open settings (display options + colors) |
 | `h` | Show keybindings help |
-| `1`–`6` | Toggle display options (timestamp/PID/TID/tag/level/color) |
 | `Tab` | Switch focus to filter input |
 | `Esc` | Return to log view (when editing filter) |
 | `Enter` | Apply filter (when editing filter) |
+
+### Settings screen (`o`)
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Switch category (Display / Colors) |
+| `1`–`6` | Toggle display options (Display category) |
+| `1`–`8` | Edit an item's color (type hex, `Enter` commits; Colors category) |
+| `[` / `]` | Cycle color presets |
+| `Esc` / `o` | Close settings |
 
 ### Filter syntax
 
@@ -95,14 +104,15 @@ package:mine             # Always true (no project context)
 ## Architecture
 
 ```
-┌─ main.rs ─── Event loop (tokio::select!) ─┐
-│  ├─ crossterm keyboard events              │
-│  ├─ logcat child process stdout → channel  │
-│  └─ 250ms tick (age filter refresh)        │
+┌─ main.rs ─── Event loop (tokio::select!) ─────┐
+│  ├─ crossterm keyboard events                 │
+│  ├─ logcat child process stdout → channel     │
+│  └─ 250ms tick (age filter refresh)           │
 ├─ logcat.rs ─ Log parsing + process lifecycle ─┤
 ├─ filter.rs ─ pest grammar → AST → evaluation ─┤
 ├─ buffer.rs ─ Ring buffer (100k hard cap) ─────┤
 ├─ app.rs ──── Global state + message dispatch ─┤
+├─ config.rs ── Colors + display persistence ───┤
 ├─ ui.rs ───── ratatui rendering ───────────────┤
 ├─ i18n.rs ─── Multi-language messages ─────────┤
 ├─ scrollback.rs ─ Scrollback buffer ───────────┤
@@ -135,6 +145,25 @@ package:mine             # Always true (no project context)
 ## Acknowledgments
 
 Package name resolution inspired by [JakeWharton/pidcat](https://github.com/JakeWharton/pidcat).
+
+## Configuration
+
+Settings are saved to `config.conf` on every change and loaded on startup. Colors
+(6 log levels, tag, timestamp), the active preset, and the display options are
+stored as `key = value` lines, e.g. `preset = default`, `verbose = #808080`,
+`show_pid = true`.
+
+The file location depends on the platform:
+
+| Platform | Path |
+|----------|------|
+| Any (if `XDG_CONFIG_HOME` is set) | `$XDG_CONFIG_HOME/tlog/config.conf` |
+| Linux / BSD | `~/.config/tlog/config.conf` |
+| macOS | `~/Library/Application Support/tlog/config.conf` |
+| Windows | `%APPDATA%\tlog\config.conf` (falls back to `%USERPROFILE%\AppData\Roaming\tlog\config.conf`) |
+
+Unknown or malformed lines are ignored per-key; missing keys fall back to
+defaults.
 
 ## Changelog
 

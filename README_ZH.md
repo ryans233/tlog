@@ -57,12 +57,21 @@ tlog --lang en
 | `p` / `Space` | 切换暂停/恢复 |
 | `C` | 清空日志缓冲区 |
 | `g` | 临时旁路过滤器（保留输入内容，再按恢复） |
-| `o` | 输出当前显示配置到日志 |
+| `o` | 打开设置（显示选项 + 颜色） |
 | `h` | 显示快捷键帮助 |
-| `1`–`6` | 切换显示选项（时间戳/PID/TID/Tag/等级/颜色） |
 | `Tab` | 切换到过滤器编辑 |
 | `Esc` | 返回日志视图（过滤器编辑时） |
 | `Enter` | 应用过滤器（过滤器编辑时） |
+
+### 设置界面（`o`）
+
+| 键 | 功能 |
+|----|------|
+| `Tab` / `Shift+Tab` | 切换分类（显示 / 颜色） |
+| `1`–`6` | 切换显示选项（显示分类） |
+| `1`–`8` | 编辑某项颜色（输入 hex，`Enter` 确认；颜色分类） |
+| `[` / `]` | 循环切换颜色预设 |
+| `Esc` / `o` | 关闭设置 |
 
 ### 过滤器语法
 
@@ -95,18 +104,19 @@ package:mine             # 恒真（无项目上下文）
 ## 架构
 
 ```
-┌─ main.rs ─── 事件循环 (tokio::select!) ─┐
-│  ├─ crossterm 键盘事件                    │
+┌─ main.rs ─── 事件循环 (tokio::select!) ──┐
+│  ├─ crossterm 键盘事件                   │
 │  ├─ logcat 子进程 stdout → channel       │
 │  └─ 250ms tick（age 过滤器刷新）         │
 ├─ logcat.rs ─ 日志解析 + 进程生命周期 ────┤
-├─ filter.rs ─ pest 语法 → AST → 求值 ────┤
+├─ filter.rs ─ pest 语法 → AST → 求值 ─────┤
 ├─ buffer.rs ─ 环形缓冲区（100k 硬上限）───┤
 ├─ app.rs ──── 全局状态 + 消息分发 ────────┤
-├─ ui.rs ───── ratatui 渲染 ──────────────┤
-├─ i18n.rs ─── 多语言消息 ────────────────┤
+├─ config.rs ── 颜色与显示设置持久化 ──────┤
+├─ ui.rs ───── ratatui 渲染 ───────────────┤
+├─ i18n.rs ─── 多语言消息 ─────────────────┤
 ├─ scrollback.rs ─ 回滚缓冲区 ─────────────┤
-└─ viewport.rs ── 底部视口管理 ───────────┘
+└─ viewport.rs ── 底部视口管理 ────────────┘
 ```
 
 ## 内存策略
@@ -135,6 +145,23 @@ package:mine             # 恒真（无项目上下文）
 ## 致谢
 
 包名解析方案参考了 [JakeWharton/pidcat](https://github.com/JakeWharton/pidcat)。
+
+## 配置
+
+设置会在每次更改后保存到 `config.conf` 并在启动时加载。颜色
+（6 个日志等级、Tag、时间戳）、当前预设与显示选项以 `键 = 值` 格式存储，
+例如 `preset = default`、`verbose = #808080`、`show_pid = true`。
+
+配置文件位置取决于平台：
+
+| 平台 | 路径 |
+|------|------|
+| 任意平台（设置了 `XDG_CONFIG_HOME`） | `$XDG_CONFIG_HOME/tlog/config.conf` |
+| Linux / BSD | `~/.config/tlog/config.conf` |
+| macOS | `~/Library/Application Support/tlog/config.conf` |
+| Windows | `%APPDATA%\tlog\config.conf`（回退 `%USERPROFILE%\AppData\Roaming\tlog\config.conf`） |
+
+未知或格式错误的行按单个键忽略，缺失的键使用默认值。
 
 ## Changelog
 
