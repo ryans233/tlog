@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_tag_filter() {
-        let expr = compile("tag:MyTag").unwrap();
+        let expr = compile("tag:MyTag", &crate::i18n::EN).unwrap();
         let entry = make_entry("MyTag", "hello", LogLevel::Info);
         assert!(expr.evaluate(&entry));
 
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_negated_tag() {
-        let expr = compile("-tag:MyTag").unwrap();
+        let expr = compile("-tag:MyTag", &crate::i18n::EN).unwrap();
         let entry = make_entry("MyTag", "hello", LogLevel::Info);
         assert!(!expr.evaluate(&entry));
 
@@ -622,7 +622,7 @@ mod tests {
     fn test_and_precedence() {
         // & binds tighter than |
         // tag:foo | level:ERROR & tag:bar  ≡  tag:foo | (level:ERROR & tag:bar)
-        let expr = compile("tag:foo | level:ERROR & tag:bar").unwrap();
+        let expr = compile("tag:foo | level:ERROR & tag:bar", &crate::i18n::EN).unwrap();
         let entry = make_entry("foo", "msg", LogLevel::Info);
         assert!(expr.evaluate(&entry), "tag:foo should match (left of |)");
 
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn test_implicit_same_key_or() {
         // tag:foo tag:bar  ≡  (tag:foo | tag:bar)
-        let expr = compile("tag:foo tag:bar").unwrap();
+        let expr = compile("tag:foo tag:bar", &crate::i18n::EN).unwrap();
 
         let e1 = make_entry("foo", "msg", LogLevel::Info);
         assert!(expr.evaluate(&e1), "tag:foo should match");
@@ -652,7 +652,7 @@ mod tests {
     fn test_implicit_different_key_and() {
         // tag:foo & level:ERROR → implicit AND between different keys
         // Both must match for the entry to pass
-        let expr = compile("tag:foo level:ERROR").unwrap();
+        let expr = compile("tag:foo level:ERROR", &crate::i18n::EN).unwrap();
 
         let e1 = make_entry("foo", "msg", LogLevel::Error);
         assert!(expr.evaluate(&e1), "tag:foo & level:ERROR");
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_level_geq() {
-        let expr = compile("level:INFO").unwrap();
+        let expr = compile("level:INFO", &crate::i18n::EN).unwrap();
         assert!(expr.evaluate(&make_entry("T", "msg", LogLevel::Info)));
         assert!(expr.evaluate(&make_entry("T", "msg", LogLevel::Warn)));
         assert!(expr.evaluate(&make_entry("T", "msg", LogLevel::Error)));
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_negated_regex() {
-        let expr = compile("-tag~:My.*Tag").unwrap();
+        let expr = compile("-tag~:My.*Tag", &crate::i18n::EN).unwrap();
         let e1 = make_entry("MyTestTag", "msg", LogLevel::Info);
         assert!(!expr.evaluate(&e1));
 
@@ -706,14 +706,14 @@ mod tests {
             package: None,
         };
 
-        let expr = compile("age:5m").unwrap();
+        let expr = compile("age:5m", &crate::i18n::EN).unwrap();
         assert!(!expr.evaluate(&entry_old), "10min old should not pass age:5m");
         assert!(expr.evaluate(&entry_recent), "2min old should pass age:5m");
     }
 
     #[test]
     fn test_is_stacktrace() {
-        let expr = compile("is:stacktrace").unwrap();
+        let expr = compile("is:stacktrace", &crate::i18n::EN).unwrap();
         let entry = make_entry("T", "\tat com.example.Foo.bar(Foo.java:42)", LogLevel::Info);
         assert!(expr.evaluate(&entry));
 
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_is_crash() {
-        let expr = compile("is:crash").unwrap();
+        let expr = compile("is:crash", &crate::i18n::EN).unwrap();
         let entry = make_entry("AndroidRuntime", "FATAL EXCEPTION: main", LogLevel::Error);
         assert!(expr.evaluate(&entry));
 
@@ -733,20 +733,20 @@ mod tests {
 
     #[test]
     fn test_invalid_filter_error() {
-        assert!(compile("tag:").is_err());
-        assert!(compile("").is_ok()); // empty = match all
+        assert!(compile("tag:", &crate::i18n::EN).is_err());
+        assert!(compile("", &crate::i18n::EN).is_ok()); // empty = match all
     }
 
     #[test]
     fn test_quoted_value() {
-        let expr = compile("tag:\"hello world\"").unwrap();
+        let expr = compile("tag:\"hello world\"", &crate::i18n::EN).unwrap();
         let entry = make_entry("hello world", "msg", LogLevel::Info);
         assert!(expr.evaluate(&entry));
     }
 
     #[test]
     fn test_name_noop() {
-        let expr = compile("name:MySavedFilter").unwrap();
+        let expr = compile("name:MySavedFilter", &crate::i18n::EN).unwrap();
         let entry = make_entry("AnyTag", "any msg", LogLevel::Info);
         assert!(expr.evaluate(&entry), "name: should be a no-op");
     }

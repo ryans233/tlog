@@ -1,5 +1,6 @@
 mod app;
 mod buffer;
+mod config;
 mod filter;
 mod logcat;
 mod scrollback;
@@ -349,7 +350,7 @@ fn replay_filtered(
 
     for pos in start..total {
         if let Some((_, entry)) = app.buffer.get_filtered(pos) {
-            batch.push(ui::format_entry(entry, &app.config));
+            batch.push(ui::format_entry(entry, &app.config, &app.palette));
         }
         if batch.len() >= 256 {
             insert_log_lines(terminal, &batch)?;
@@ -374,7 +375,15 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('q') => return false,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
+        _ => {}
+    }
 
+    // Color overlay captures all keys until closed (Esc / c).
+    if app.show_colors {
+        return handle_color_key(app, key);
+    }
+
+    match key.code {
         // Pause/resume
         KeyCode::Char('p') | KeyCode::Char(' ') => {
             app.paused = !app.paused;
@@ -411,9 +420,81 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
             app.show_options = false;
             app.needs_replay = true;
         }
+        // Color config overlay
+        KeyCode::Char('c') => {
+            app.show_colors = true;
+            app.show_help = false;
+            app.show_options = false;
+            app.needs_replay = true;
+        }
         _ => {}
     }
     true
+}
+
+fn handle_color_key(app: &mut App, key: event::KeyEvent) -> bool {
+    if app.color_editing.is_some() {
+        match key.code {
+            KeyCode::Char(c) if c.is_ascii_hexdigit() && app.color_input.len() < 6 => {
+                app.color_input.push(c);
+            }
+            KeyCode::Backspace => {
+                app.color_input.pop();
+            }
+            KeyCode::Enter => commit_color_edit(app),
+            KeyCode::Esc => {
+                app.color_editing = None;
+                app.color_error = None;
+            }
+            _ => {}
+        }
+        return true;
+    }
+    match key.code {
+        KeyCode::Char(c) if crate::config::ColorItem::from_key(c).is_some() => {
+            if let Some(item) = crate::config::ColorItem::from_key(c) {
+                app.color_editing = Some(item);
+                app.color_input = String::new();
+                app.color_error = None;
+            }
+        }
+        KeyCode::Char('[') => apply_preset(app, app.color_preset.prev()),
+        KeyCode::Char(']') => apply_preset(app, app.color_preset.next()),
+        KeyCode::Esc | KeyCode::Char('c') => {
+            app.show_colors = false;
+            app.needs_replay = true;
+        }
+        _ => {}
+    }
+    true
+}
+
+fn commit_color_edit(app: &mut App) {
+    let Some(item) = app.color_editing else { return; };
+    match crate::config::hex_to_color(&app.color_input) {
+        Some(c) => {
+            item.set(&mut app.palette, c);
+            app.color_editing = None;
+            app.color_error = None;
+            app.color_preset = crate::config::Preset::Custom;
+            app.needs_replay = true; // scrollback must re-render with the new color
+            app.save_config();
+        }
+        None => {
+            app.color_error = Some(app.msgs.color_invalid_hex.to_string());
+        }
+    }
+}
+
+fn apply_preset(app: &mut App, preset: crate::config::Preset) {
+    if preset == crate::config::Preset::Custom {
+        return;
+    }
+    preset.apply(&mut app.palette);
+    app.color_preset = preset;
+    app.color_error = None;
+    app.needs_replay = true;
+    app.save_config();
 }
 
 fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
@@ -447,4 +528,180 @@ fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
         _ => {}
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    /// Serializes tests that touch the process-global XDG_CONFIG_HOME.
+    static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Point XDG_CONFIG_HOME at a unique temp dir so saves land in an isolated
+    /// file. Returns the dir plus the lock guard (held for the test's lifetime).
+    fn isolate_config(
+        tag: &str,
+    ) -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let guard = CONFIG_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "tlog-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: the lock guarantees no other test reads XDG_CONFIG_HOME while
+        // this test owns it; each test uses its own unique dir.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        (dir, guard)
+    }
+
+    fn char_key(c: char) -> event::KeyEvent {
+        event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_color_overlay_edit_commit_and_save() {
+        let (dir, _guard) = isolate_config("edit");
+        let mut app = App::new(i18n::Lang::En);
+
+        // 'c' opens the overlay and routes all keys to the color handler.
+        assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(app.show_colors);
+
+        // '1' starts editing Verbose.
+        assert!(handle_logview_key(&mut app, char_key('1')));
+        assert_eq!(app.color_editing, Some(crate::config::ColorItem::Verbose));
+        assert_eq!(app.color_input, "");
+
+        // Hex digits accumulate (max 6).
+        for c in ['f', 'f', '8', '8', '0', '0'] {
+            assert!(handle_logview_key(&mut app, char_key(c)));
+        }
+        assert_eq!(app.color_input, "ff8800");
+        // A 7th digit is rejected.
+        assert!(handle_logview_key(&mut app, char_key('1')));
+        assert_eq!(app.color_input, "ff8800");
+
+        // Enter commits, flips preset to Custom, clears edit state.
+        assert!(handle_logview_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        assert_eq!(app.color_editing, None);
+        assert_eq!(app.color_preset, crate::config::Preset::Custom);
+        assert_eq!(app.palette.verbose, Color::Rgb(0xFF, 0x88, 0x00));
+        assert_eq!(app.color_error, None);
+
+        // Persisted immediately.
+        let conf = crate::config::config_path().expect("config path");
+        let text = std::fs::read_to_string(&conf).expect("config file written");
+        assert!(text.contains("preset = custom"), "got: {text}");
+        assert!(text.contains("verbose = #FF8800"), "got: {text}");
+
+        // 'c' closes the overlay.
+        assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(!app.show_colors);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_color_overlay_preset_cycle_and_save() {
+        let (dir, _guard) = isolate_config("preset");
+        let mut app = App::new(i18n::Lang::En);
+
+        assert!(handle_logview_key(&mut app, char_key('c')));
+        // From Default, '[' goes to HighContrast.
+        assert!(handle_logview_key(&mut app, char_key('[')));
+        assert_eq!(app.color_preset, crate::config::Preset::HighContrast);
+        assert_eq!(app.palette.verbose, Color::Rgb(0xA9, 0xA9, 0xA9));
+        // ']' from HighContrast wraps to Default.
+        assert!(handle_logview_key(&mut app, char_key(']')));
+        assert_eq!(app.color_preset, crate::config::Preset::Default);
+        assert_eq!(app.palette.verbose, Color::Rgb(0x80, 0x80, 0x80));
+
+        // Persisted after the last switch.
+        let conf = crate::config::config_path().expect("config path");
+        let text = std::fs::read_to_string(&conf).expect("config file written");
+        assert!(text.contains("preset = default"), "got: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_color_overlay_invalid_hex_and_cancel() {
+        let (dir, _guard) = isolate_config("invalid");
+        let mut app = App::new(i18n::Lang::En);
+
+        assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(handle_logview_key(&mut app, char_key('1')));
+        // Too-short hex: commit shows the invalid-hex error and keeps editing.
+        for c in ['f', 'f'] {
+            assert!(handle_logview_key(&mut app, char_key(c)));
+        }
+        assert!(handle_logview_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        assert_eq!(app.color_editing, Some(crate::config::ColorItem::Verbose));
+        assert_eq!(
+            app.color_error.as_deref(),
+            Some(app.msgs.color_invalid_hex)
+        );
+
+        // Esc cancels the edit without saving.
+        assert!(handle_logview_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        ));
+        assert_eq!(app.color_editing, None);
+        assert_eq!(app.color_error, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_display_toggle_persists() {
+        let (dir, _guard) = isolate_config("display");
+        let mut app = App::new(i18n::Lang::En);
+
+        // Key 2 toggles PID display through the real logview handler.
+        assert!(handle_logview_key(&mut app, char_key('2')));
+        assert!(!app.config.show_pid);
+        assert!(app.config.show_timestamp);
+
+        // Toggle persisted immediately.
+        let conf = crate::config::config_path().expect("config path");
+        let text = std::fs::read_to_string(&conf).expect("config file written");
+        assert!(text.contains("show_pid = false"), "got: {text}");
+        assert!(text.contains("show_timestamp = true"), "got: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_palette_reloads_from_config_on_startup() {
+        let (dir, _guard) = isolate_config("reload");
+        let conf_dir = dir.join("tlog");
+        std::fs::create_dir_all(&conf_dir).expect("create conf dir");
+        std::fs::write(
+            conf_dir.join("config.conf"),
+            "preset = solarized\nverbose = #112233\ntag = #AABBCC\nshow_pid = false\ncolorize = false\n",
+        )
+        .expect("write config");
+
+        let app = App::new(i18n::Lang::En);
+        assert_eq!(app.color_preset, crate::config::Preset::Solarized);
+        assert_eq!(app.palette.verbose, Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(app.palette.tag, Color::Rgb(0xAA, 0xBB, 0xCC));
+        // Unlisted keys keep defaults.
+        assert_eq!(app.palette.debug, Color::Rgb(0x00, 0xFF, 0xFF));
+        // Display settings load from the same file.
+        assert!(!app.config.show_pid);
+        assert!(!app.config.colorize);
+        assert!(app.config.show_timestamp);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

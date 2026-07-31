@@ -8,6 +8,7 @@ use ratatui::{
 use chrono::{Datelike, Timelike};
 
 use crate::app::{App, DisplayConfig, Focus};
+use crate::config::{color_to_hex, ColorItem, ColorPalette};
 use crate::logcat::{LogEntry, LogLevel};
 use crate::viewport::ViewportFrame;
 
@@ -111,10 +112,10 @@ fn filter_status<'a>(app: &App, msgs: &'a crate::i18n::Messages) -> &'a str {
 // ── Entry formatting ─────────────────────────────────────────────────────────
 
 /// Format a single log entry into a ratatui `Line`.
-pub fn format_entry(entry: &LogEntry, config: &DisplayConfig) -> Line<'static> {
+pub fn format_entry(entry: &LogEntry, config: &DisplayConfig, palette: &ColorPalette) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
-    let level_style = level_style(entry.level);
+    let level_style = level_style(entry.level, palette);
 
     if config.show_timestamp {
         let ts = entry.timestamp;
@@ -129,7 +130,7 @@ pub fn format_entry(entry: &LogEntry, config: &DisplayConfig) -> Line<'static> {
         );
         spans.push(Span::styled(
             format!("{} ", ts_str),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.timestamp),
         ));
     }
 
@@ -163,7 +164,7 @@ pub fn format_entry(entry: &LogEntry, config: &DisplayConfig) -> Line<'static> {
         };
         spans.push(Span::styled(
             tag_str,
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(palette.tag),
         ));
     }
 
@@ -181,14 +182,12 @@ pub fn format_entry(entry: &LogEntry, config: &DisplayConfig) -> Line<'static> {
     Line::from(spans)
 }
 
-fn level_style(level: LogLevel) -> Style {
-    match level {
-        LogLevel::Verbose => Style::default().fg(Color::DarkGray),
-        LogLevel::Debug => Style::default().fg(Color::Cyan),
-        LogLevel::Info => Style::default().fg(Color::Green),
-        LogLevel::Warn => Style::default().fg(Color::Yellow),
-        LogLevel::Error => Style::default().fg(Color::Red),
-        LogLevel::Fatal => Style::default().fg(Color::Red).bg(Color::DarkGray),
+fn level_style(level: LogLevel, palette: &ColorPalette) -> Style {
+    let fg = palette.level_color(level);
+    if level == LogLevel::Fatal {
+        Style::default().fg(fg).bg(Color::DarkGray) // Fatal keeps its fixed darkgray background
+    } else {
+        Style::default().fg(fg)
     }
 }
 
@@ -223,6 +222,10 @@ fn help_lines(msgs: &crate::i18n::Messages) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("  o           ", key_style),
             Span::styled(msgs.help_options, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  c           ", key_style),
+            Span::styled(msgs.help_colors, desc),
         ]),
         Line::from(vec![
             Span::styled("  g           ", key_style),
@@ -323,12 +326,65 @@ fn options_lines(app: &App) -> Vec<Line<'static>> {
     ]
 }
 
+fn colors_lines(app: &App) -> Vec<Line<'static>> {
+    let msgs = app.msgs;
+    let header = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(Color::Cyan);
+
+    let mut lines = vec![Line::from(Span::styled(msgs.color_title, header))];
+    // Preset row
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {}: ", msgs.color_preset_label), key_style),
+        Span::styled(
+            app.color_preset.label(msgs),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled("   [ ]  ", key_style),
+    ]));
+    // 8 item rows
+    for (i, item) in ColorItem::ALL.iter().enumerate() {
+        let n = i + 1;
+        if app.color_editing == Some(*item) {
+            let text = format!("  [{}] {}  #{}{}", n, item.label(msgs), app.color_input, "█");
+            lines.push(Line::from(Span::styled(text, key_style)));
+        } else {
+            let color = item.color(&app.palette);
+            let hex = color_to_hex(color);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  [{}] {}  {}  ", n, item.label(msgs), hex),
+                    Style::default().fg(color),
+                ),
+                Span::styled("    ", Style::default().bg(color)), // color swatch
+            ]));
+        }
+    }
+    // Hint or error row
+    if let Some(ref err) = app.color_error {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", msgs.color_hint),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::default());
+    lines
+}
+
 /// Render the help or options overlay in the given area.
 fn render_overlay(f: &mut ViewportFrame, app: &App, area: Rect) {
     let lines: Vec<Line<'static>> = if app.show_help {
         help_lines(app.msgs)
     } else if app.show_options {
         options_lines(app)
+    } else if app.show_colors {
+        colors_lines(app)
     } else {
         return;
     };
@@ -341,4 +397,49 @@ fn render_overlay(f: &mut ViewportFrame, app: &App, area: Rect) {
 
     let text = Paragraph::new(lines);
     f.render_widget(text, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(level: LogLevel, tag: &str, msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp: chrono::NaiveDateTime::parse_from_str(
+                "2024-07-27 10:15:30.123",
+                "%Y-%m-%d %H:%M:%S%.3f",
+            )
+            .expect("test timestamp should parse"),
+            pid: 1234,
+            tid: 5678,
+            level,
+            tag: tag.to_string(),
+            message: msg.to_string(),
+            package: None,
+        }
+    }
+
+    #[test]
+    fn test_format_entry_custom_colors() {
+        let mut palette = ColorPalette::default();
+        palette.error = Color::Rgb(0xFF, 0x30, 0x30);
+        palette.tag = Color::Rgb(0x12, 0x34, 0x56);
+        palette.timestamp = Color::Rgb(0x65, 0x43, 0x21);
+        let entry = make_entry(LogLevel::Error, "MyTag", "boom");
+        let line = format_entry(&entry, &DisplayConfig::default(), &palette);
+        // Span order with all toggles on: 0=timestamp, 1=pid, 2=tid, 3=level, 4=tag, 5=message.
+        assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(0x65, 0x43, 0x21)));
+        assert_eq!(line.spans[3].style.fg, Some(Color::Rgb(0xFF, 0x30, 0x30)));
+        assert_eq!(line.spans[4].style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+        assert_eq!(line.spans[5].style.fg, Some(Color::Rgb(0xFF, 0x30, 0x30)));
+    }
+
+    #[test]
+    fn test_format_entry_colorize_off() {
+        let entry = make_entry(LogLevel::Info, "MyTag", "hello");
+        let mut config = DisplayConfig::default();
+        config.colorize = false;
+        let line = format_entry(&entry, &config, &ColorPalette::default());
+        assert_eq!(line.spans[5].style.fg, None);
+    }
 }

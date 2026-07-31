@@ -81,6 +81,27 @@ pub struct Messages {
     pub opts_color: &'static str,
     pub on_label: &'static str,
     pub off_label: &'static str,
+
+    // ── Color config ────────────────────────────────────────────────────
+    pub help_colors: &'static str,
+    pub color_title: &'static str,
+    pub color_preset_label: &'static str,
+    pub color_hint: &'static str,
+    pub color_invalid_hex: &'static str,
+    pub config_save_error: &'static str,
+    pub color_level_verbose: &'static str,
+    pub color_level_debug: &'static str,
+    pub color_level_info: &'static str,
+    pub color_level_warn: &'static str,
+    pub color_level_error: &'static str,
+    pub color_level_fatal: &'static str,
+    pub color_tag: &'static str,
+    pub color_timestamp: &'static str,
+    pub preset_default: &'static str,
+    pub preset_solarized: &'static str,
+    pub preset_monokai: &'static str,
+    pub preset_highcontrast: &'static str,
+    pub preset_custom: &'static str,
 }
 
 impl Messages {
@@ -157,6 +178,26 @@ pub const EN: Messages = Messages {
     opts_color: "Color",
     on_label: "ON ",
     off_label: "OFF",
+
+    help_colors: "Show color config",
+    color_title: "── Color Config ────────",
+    color_preset_label: "Preset",
+    color_hint: "1-8 edit hex | [ ] preset | Esc close",
+    color_invalid_hex: "Invalid hex, expected #RRGGBB",
+    config_save_error: "Failed to save config file",
+    color_level_verbose: "Verbose",
+    color_level_debug: "Debug",
+    color_level_info: "Info",
+    color_level_warn: "Warn",
+    color_level_error: "Error",
+    color_level_fatal: "Fatal",
+    color_tag: "Tag",
+    color_timestamp: "Timestamp",
+    preset_default: "Default",
+    preset_solarized: "Solarized Dark",
+    preset_monokai: "Monokai",
+    preset_highcontrast: "High Contrast",
+    preset_custom: "Custom",
 };
 
 pub const ZH: Messages = Messages {
@@ -199,6 +240,26 @@ pub const ZH: Messages = Messages {
     opts_color: "颜色",
     on_label: "ON ",
     off_label: "OFF",
+
+    help_colors: "显示颜色配置",
+    color_title: "── 颜色配置 ──────────",
+    color_preset_label: "预设",
+    color_hint: "1-8 编辑颜色 | [ ] 预设 | Esc 关闭",
+    color_invalid_hex: "无效的hex颜色，应为 #RRGGBB",
+    config_save_error: "保存配置文件失败",
+    color_level_verbose: "冗长",
+    color_level_debug: "调试",
+    color_level_info: "信息",
+    color_level_warn: "警告",
+    color_level_error: "错误",
+    color_level_fatal: "致命",
+    color_tag: "Tag",
+    color_timestamp: "时间戳",
+    preset_default: "默认",
+    preset_solarized: "Solarized Dark",
+    preset_monokai: "Monokai",
+    preset_highcontrast: "高对比度",
+    preset_custom: "自定义",
 };
 
 /// Resolve the active language from CLI override or environment.
