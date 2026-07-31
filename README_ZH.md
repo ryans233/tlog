@@ -11,8 +11,8 @@
 - **实时日志流** — 通过 `adb logcat -v threadtime` 读取并解析日志
 - **Android Studio 风格过滤器** — 支持 `tag:`、`level:`、`package:`、`message:`、`age:`、`is:` 等键值过滤，支持正则、否定和布尔运算
 - **包名解析** — 自动从 ActivityManager 生命周期事件解析 PID→包名映射（参考 pidcat）
-- **颜色高亮** — 按日志等级着色（V=灰 D=青 I=绿 W=黄 E=红 F=红底）
-- **显示选项切换** — 按 `1`–`6` 开关时间戳、PID、TID、Tag、等级、颜色的显示
+- **颜色高亮** — 按日志等级着色（V=灰 D=青 I=绿 W=黄 E=红 F=红底），可在设置中完全自定义
+- **显示选项** — 在设置界面（`o`）中开关时间戳、PID、TID、Tag、等级、颜色的显示
 - **暂停/恢复** — 冻结日志输出以便仔细查看
 - **过滤器旁路** — 按 `g` 临时禁用过滤器（保留输入内容，再按恢复）
 - **多语言** — 界面文本支持中文和英文，根据 `LANG` 环境变量自动检测，也可通过 `--lang` 指定
@@ -135,6 +135,10 @@ package:mine             # 恒真（无项目上下文）
 ## 致谢
 
 包名解析方案参考了 [JakeWharton/pidcat](https://github.com/JakeWharton/pidcat)。
+
+## Changelog
+
+版本记录见 [CHANGELOGS_ZH.md](CHANGELOGS_ZH.md)。
 
 ## License
 
