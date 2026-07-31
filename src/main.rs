@@ -176,7 +176,6 @@ const MAX_REPLAY: usize = 10_000;
 /// screen and the scrollback the session filled, and park the cursor on the
 /// bottom row so the shell prompt lands in a clean terminal.
 fn restore_terminal<W: std::io::Write>(w: &mut W, term_rows: u16) -> std::io::Result<()> {
-    use std::io::Write;
     crossterm::execute!(
         w,
         crossterm::style::ResetColor,
