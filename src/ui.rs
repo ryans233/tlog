@@ -220,7 +220,7 @@ fn help_lines(msgs: &crate::i18n::Messages) -> Vec<Line<'static>> {
             Span::styled(msgs.help_clear, desc),
         ]),
         Line::from(vec![
-            Span::styled("  o / c       ", key_style),
+            Span::styled("  o           ", key_style),
             Span::styled(msgs.help_settings, desc),
         ]),
         Line::from(vec![

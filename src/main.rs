@@ -378,7 +378,7 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         _ => {}
     }
 
-    // Settings overlay captures all keys until closed (Esc / o / c).
+    // Settings overlay captures all keys until closed (Esc / o).
     if app.show_settings {
         return handle_settings_key(app, key);
     }
@@ -401,8 +401,8 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Tab => {
             app.focus = Focus::FilterInput;
         }
-        // Settings overlay: display config + colors (o / c)
-        KeyCode::Char('o') | KeyCode::Char('c') => {
+        // Settings overlay: display config + colors (o)
+        KeyCode::Char('o') => {
             app.show_settings = !app.show_settings;
             app.show_help = false;
             app.needs_replay = true;
@@ -442,7 +442,7 @@ fn handle_settings_key(app: &mut App, key: event::KeyEvent) -> bool {
             KeyCode::Char(']') => apply_preset(app, app.color_preset.next()),
             KeyCode::Tab => switch_category(app, app.settings_category.next()),
             KeyCode::BackTab => switch_category(app, app.settings_category.prev()),
-            KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('c') => close_settings(app),
+            KeyCode::Esc | KeyCode::Char('o') => close_settings(app),
             _ => {}
         }
         return true;
@@ -458,7 +458,7 @@ fn handle_settings_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Char('6') => app.toggle_config('6'),
         KeyCode::Tab => switch_category(app, app.settings_category.next()),
         KeyCode::BackTab => switch_category(app, app.settings_category.prev()),
-        KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('c') => close_settings(app),
+        KeyCode::Esc | KeyCode::Char('o') => close_settings(app),
         _ => {}
     }
     true
@@ -588,8 +588,8 @@ mod tests {
         let (dir, _guard) = isolate_config("edit");
         let mut app = App::new(i18n::Lang::En);
 
-        // 'c' opens the settings overlay; it starts on the Display category.
-        assert!(handle_logview_key(&mut app, char_key('c')));
+        // 'o' opens the settings overlay; it starts on the Display category.
+        assert!(handle_logview_key(&mut app, char_key('o')));
         assert!(app.show_settings);
         assert_eq!(app.settings_category, app::SettingsCategory::Display);
 
@@ -645,7 +645,7 @@ mod tests {
         let (dir, _guard) = isolate_config("preset");
         let mut app = App::new(i18n::Lang::En);
 
-        assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(handle_logview_key(&mut app, char_key('o')));
         assert!(handle_logview_key(
             &mut app,
             event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
@@ -672,7 +672,7 @@ mod tests {
         let (dir, _guard) = isolate_config("invalid");
         let mut app = App::new(i18n::Lang::En);
 
-        assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(handle_logview_key(&mut app, char_key('o')));
         assert!(handle_logview_key(
             &mut app,
             event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
@@ -711,6 +711,9 @@ mod tests {
         // Main-window quick toggles are gone: '2' does nothing here.
         assert!(handle_logview_key(&mut app, char_key('2')));
         assert!(app.config.show_pid);
+        // 'c' no longer opens settings; only 'o' is the entry key.
+        assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(!app.show_settings);
 
         // 'o' opens settings; Display is the default category, so '2' toggles
         // the PID row through the real handler.
