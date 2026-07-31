@@ -7,7 +7,7 @@ use ratatui::{
 
 use chrono::{Datelike, Timelike};
 
-use crate::app::{App, DisplayConfig, Focus};
+use crate::app::{App, DisplayConfig, Focus, SettingsCategory};
 use crate::config::{color_to_hex, ColorItem, ColorPalette};
 use crate::logcat::{LogEntry, LogLevel};
 use crate::viewport::ViewportFrame;
@@ -192,7 +192,7 @@ fn level_style(level: LogLevel, palette: &ColorPalette) -> Style {
 }
 
 
-// ── Help / Options overlay ───────────────────────────────────────────────────
+// ── Help / Settings overlay ─────────────────────────────────────────────────
 
 fn help_lines(msgs: &crate::i18n::Messages) -> Vec<Line<'static>> {
     let header = Style::default()
@@ -220,12 +220,8 @@ fn help_lines(msgs: &crate::i18n::Messages) -> Vec<Line<'static>> {
             Span::styled(msgs.help_clear, desc),
         ]),
         Line::from(vec![
-            Span::styled("  o           ", key_style),
-            Span::styled(msgs.help_options, desc),
-        ]),
-        Line::from(vec![
-            Span::styled("  c           ", key_style),
-            Span::styled(msgs.help_colors, desc),
+            Span::styled("  o / c       ", key_style),
+            Span::styled(msgs.help_settings, desc),
         ]),
         Line::from(vec![
             Span::styled("  g           ", key_style),
@@ -239,19 +235,50 @@ fn help_lines(msgs: &crate::i18n::Messages) -> Vec<Line<'static>> {
             Span::styled("  Esc         ", key_style),
             Span::styled(msgs.help_esc, desc),
         ]),
-        Line::from(vec![
-            Span::styled("  1-6         ", key_style),
-            Span::styled(msgs.help_display_opts, desc),
-        ]),
         Line::default(),
     ]
 }
 
-fn options_lines(app: &App) -> Vec<Line<'static>> {
-    let msgs = app.msgs;
+/// The settings screen: shared title + category row, then the active
+/// category's rows. New categories plug into `SettingsCategory` and the
+/// match in `settings_lines`.
+fn settings_lines(app: &App) -> Vec<Line<'static>> {
     let header = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::from(Span::styled(app.msgs.settings_title, header))];
+    lines.push(settings_category_row(app));
+    match app.settings_category {
+        SettingsCategory::Display => lines.extend(settings_display_rows(app)),
+        SettingsCategory::Color => lines.extend(settings_color_rows(app)),
+    }
+    lines
+}
+
+/// Category tabs; the active one is highlighted, `[Tab]` cycles.
+/// Iterates `SettingsCategory::ALL` so a new category only needs a variant,
+/// a `label` arm, i18n strings, and its rows fn.
+fn settings_category_row(app: &App) -> Line<'static> {
+    let msgs = app.msgs;
+    let key_style = Style::default().fg(Color::Cyan);
+    let active = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let inactive = Style::default().fg(Color::DarkGray);
+    let mut spans = vec![Span::styled("  ", inactive)];
+    for (i, cat) in SettingsCategory::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  |  ", inactive));
+        }
+        let style = if *cat == app.settings_category { active } else { inactive };
+        spans.push(Span::styled(cat.label(msgs), style));
+    }
+    spans.push(Span::styled("   [Tab]  ", key_style));
+    Line::from(spans)
+}
+
+fn settings_display_rows(app: &App) -> Vec<Line<'static>> {
+    let msgs = app.msgs;
     let key_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -266,8 +293,7 @@ fn options_lines(app: &App) -> Vec<Line<'static>> {
         }
     }
 
-    vec![
-        Line::from(Span::styled(msgs.opts_title, header)),
+    let mut rows = vec![
         Line::from(vec![
             Span::styled("  [1] ", key_style),
             Span::styled(msgs.opts_timestamp, key_style),
@@ -322,37 +348,37 @@ fn options_lines(app: &App) -> Vec<Line<'static>> {
                 style_for(app.config.colorize),
             ),
         ]),
-        Line::default(),
-    ]
+    ];
+    rows.push(Line::from(Span::styled(
+        format!("  {}", msgs.settings_display_hint),
+        Style::default().fg(Color::DarkGray),
+    )));
+    rows.push(Line::default());
+    rows
 }
 
-fn colors_lines(app: &App) -> Vec<Line<'static>> {
+fn settings_color_rows(app: &App) -> Vec<Line<'static>> {
     let msgs = app.msgs;
-    let header = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
     let key_style = Style::default().fg(Color::Cyan);
 
-    let mut lines = vec![Line::from(Span::styled(msgs.color_title, header))];
-    // Preset row
-    lines.push(Line::from(vec![
+    let mut rows = vec![Line::from(vec![
         Span::styled(format!("  {}: ", msgs.color_preset_label), key_style),
         Span::styled(
             app.color_preset.label(msgs),
             Style::default().fg(Color::Yellow),
         ),
         Span::styled("   [ ]  ", key_style),
-    ]));
+    ])];
     // 8 item rows
     for (i, item) in ColorItem::ALL.iter().enumerate() {
         let n = i + 1;
         if app.color_editing == Some(*item) {
             let text = format!("  [{}] {}  #{}{}", n, item.label(msgs), app.color_input, "█");
-            lines.push(Line::from(Span::styled(text, key_style)));
+            rows.push(Line::from(Span::styled(text, key_style)));
         } else {
             let color = item.color(&app.palette);
             let hex = color_to_hex(color);
-            lines.push(Line::from(vec![
+            rows.push(Line::from(vec![
                 Span::styled(
                     format!("  [{}] {}  {}  ", n, item.label(msgs), hex),
                     Style::default().fg(color),
@@ -363,28 +389,26 @@ fn colors_lines(app: &App) -> Vec<Line<'static>> {
     }
     // Hint or error row
     if let Some(ref err) = app.color_error {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             format!("  {}", err),
             Style::default().fg(Color::Red),
         )));
     } else {
-        lines.push(Line::from(Span::styled(
+        rows.push(Line::from(Span::styled(
             format!("  {}", msgs.color_hint),
             Style::default().fg(Color::DarkGray),
         )));
     }
-    lines.push(Line::default());
-    lines
+    rows.push(Line::default());
+    rows
 }
 
-/// Render the help or options overlay in the given area.
+/// Render the help or settings overlay in the given area.
 fn render_overlay(f: &mut ViewportFrame, app: &App, area: Rect) {
     let lines: Vec<Line<'static>> = if app.show_help {
         help_lines(app.msgs)
-    } else if app.show_options {
-        options_lines(app)
-    } else if app.show_colors {
-        colors_lines(app)
+    } else if app.show_settings {
+        settings_lines(app)
     } else {
         return;
     };
@@ -441,5 +465,28 @@ mod tests {
         config.colorize = false;
         let line = format_entry(&entry, &config, &ColorPalette::default());
         assert_eq!(line.spans[5].style.fg, None);
+    }
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn test_settings_lines_structure() {
+        let app = App::new(crate::i18n::Lang::En);
+
+        // Display category: title + category row + 6 toggles + hint + blank.
+        let lines = settings_lines(&app);
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines[0].spans[0].content.as_ref(), app.msgs.settings_title);
+        assert!(line_text(&lines[1]).contains(app.msgs.settings_category_display));
+        assert!(line_text(&lines[1]).contains(app.msgs.settings_category_color));
+
+        // Color category: title + category row + preset + 8 items + hint + blank.
+        let mut app = app;
+        app.settings_category = SettingsCategory::Color;
+        let lines = settings_lines(&app);
+        assert_eq!(lines.len(), 13);
+        assert!(line_text(&lines[1]).contains(app.msgs.settings_category_color));
     }
 }

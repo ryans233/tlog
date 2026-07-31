@@ -378,9 +378,9 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         _ => {}
     }
 
-    // Color overlay captures all keys until closed (Esc / c).
-    if app.show_colors {
-        return handle_color_key(app, key);
+    // Settings overlay captures all keys until closed (Esc / o / c).
+    if app.show_settings {
+        return handle_settings_key(app, key);
     }
 
     match key.code {
@@ -401,30 +401,16 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Tab => {
             app.focus = Focus::FilterInput;
         }
-        // Display config toggles (1-6)
-        KeyCode::Char('1') => app.toggle_config('1'),
-        KeyCode::Char('2') => app.toggle_config('2'),
-        KeyCode::Char('3') => app.toggle_config('3'),
-        KeyCode::Char('4') => app.toggle_config('4'),
-        KeyCode::Char('5') => app.toggle_config('5'),
-        KeyCode::Char('6') => app.toggle_config('6'),
-        // Options overlay: toggle display config status
-        KeyCode::Char('o') => {
-            app.show_options = !app.show_options;
+        // Settings overlay: display config + colors (o / c)
+        KeyCode::Char('o') | KeyCode::Char('c') => {
+            app.show_settings = !app.show_settings;
             app.show_help = false;
             app.needs_replay = true;
         }
         // Help overlay: toggle keybindings
         KeyCode::Char('h') => {
             app.show_help = !app.show_help;
-            app.show_options = false;
-            app.needs_replay = true;
-        }
-        // Color config overlay
-        KeyCode::Char('c') => {
-            app.show_colors = true;
-            app.show_help = false;
-            app.show_options = false;
+            app.show_settings = false;
             app.needs_replay = true;
         }
         _ => {}
@@ -432,41 +418,78 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
     true
 }
 
-fn handle_color_key(app: &mut App, key: event::KeyEvent) -> bool {
-    if app.color_editing.is_some() {
+/// Keys while the settings overlay is open. Display category: 1-6 toggle the
+/// display options; Color category: 1-8 edit hex, [ ] cycle presets; Tab
+/// switches category; Esc / o / c close.
+fn handle_settings_key(app: &mut App, key: event::KeyEvent) -> bool {
+    use app::SettingsCategory;
+
+    if app.settings_category == SettingsCategory::Color {
+        // While editing an item, all keys belong to the hex input.
+        if app.color_editing.is_some() {
+            handle_color_edit_key(app, key);
+            return true;
+        }
         match key.code {
-            KeyCode::Char(c) if c.is_ascii_hexdigit() && app.color_input.len() < 6 => {
-                app.color_input.push(c);
+            KeyCode::Char(c) if crate::config::ColorItem::from_key(c).is_some() => {
+                if let Some(item) = crate::config::ColorItem::from_key(c) {
+                    app.color_editing = Some(item);
+                    app.color_input = String::new();
+                    app.color_error = None;
+                }
             }
-            KeyCode::Backspace => {
-                app.color_input.pop();
-            }
-            KeyCode::Enter => commit_color_edit(app),
-            KeyCode::Esc => {
-                app.color_editing = None;
-                app.color_error = None;
-            }
+            KeyCode::Char('[') => apply_preset(app, app.color_preset.prev()),
+            KeyCode::Char(']') => apply_preset(app, app.color_preset.next()),
+            KeyCode::Tab => switch_category(app, app.settings_category.next()),
+            KeyCode::BackTab => switch_category(app, app.settings_category.prev()),
+            KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('c') => close_settings(app),
             _ => {}
         }
         return true;
     }
+
+    // Display category.
     match key.code {
-        KeyCode::Char(c) if crate::config::ColorItem::from_key(c).is_some() => {
-            if let Some(item) = crate::config::ColorItem::from_key(c) {
-                app.color_editing = Some(item);
-                app.color_input = String::new();
-                app.color_error = None;
-            }
-        }
-        KeyCode::Char('[') => apply_preset(app, app.color_preset.prev()),
-        KeyCode::Char(']') => apply_preset(app, app.color_preset.next()),
-        KeyCode::Esc | KeyCode::Char('c') => {
-            app.show_colors = false;
-            app.needs_replay = true;
-        }
+        KeyCode::Char('1') => app.toggle_config('1'),
+        KeyCode::Char('2') => app.toggle_config('2'),
+        KeyCode::Char('3') => app.toggle_config('3'),
+        KeyCode::Char('4') => app.toggle_config('4'),
+        KeyCode::Char('5') => app.toggle_config('5'),
+        KeyCode::Char('6') => app.toggle_config('6'),
+        KeyCode::Tab => switch_category(app, app.settings_category.next()),
+        KeyCode::BackTab => switch_category(app, app.settings_category.prev()),
+        KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('c') => close_settings(app),
         _ => {}
     }
     true
+}
+
+/// Hex-input sub-state of the Color category.
+fn handle_color_edit_key(app: &mut App, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Char(c) if c.is_ascii_hexdigit() && app.color_input.len() < 6 => {
+            app.color_input.push(c);
+        }
+        KeyCode::Backspace => {
+            app.color_input.pop();
+        }
+        KeyCode::Enter => commit_color_edit(app),
+        KeyCode::Esc => {
+            app.color_editing = None;
+            app.color_error = None;
+        }
+        _ => {}
+    }
+}
+
+fn switch_category(app: &mut App, category: app::SettingsCategory) {
+    app.settings_category = category;
+    app.needs_replay = true;
+}
+
+fn close_settings(app: &mut App) {
+    app.show_settings = false;
+    app.needs_replay = true;
 }
 
 fn commit_color_edit(app: &mut App) {
@@ -565,9 +588,17 @@ mod tests {
         let (dir, _guard) = isolate_config("edit");
         let mut app = App::new(i18n::Lang::En);
 
-        // 'c' opens the overlay and routes all keys to the color handler.
+        // 'c' opens the settings overlay; it starts on the Display category.
         assert!(handle_logview_key(&mut app, char_key('c')));
-        assert!(app.show_colors);
+        assert!(app.show_settings);
+        assert_eq!(app.settings_category, app::SettingsCategory::Display);
+
+        // Tab switches to the Color category.
+        assert!(handle_logview_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+        ));
+        assert_eq!(app.settings_category, app::SettingsCategory::Color);
 
         // '1' starts editing Verbose.
         assert!(handle_logview_key(&mut app, char_key('1')));
@@ -599,9 +630,12 @@ mod tests {
         assert!(text.contains("preset = custom"), "got: {text}");
         assert!(text.contains("verbose = #FF8800"), "got: {text}");
 
-        // 'c' closes the overlay.
-        assert!(handle_logview_key(&mut app, char_key('c')));
-        assert!(!app.show_colors);
+        // Esc closes the settings overlay.
+        assert!(handle_logview_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        ));
+        assert!(!app.show_settings);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -612,6 +646,10 @@ mod tests {
         let mut app = App::new(i18n::Lang::En);
 
         assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(handle_logview_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+        ));
         // From Default, '[' goes to HighContrast.
         assert!(handle_logview_key(&mut app, char_key('[')));
         assert_eq!(app.color_preset, crate::config::Preset::HighContrast);
@@ -635,6 +673,10 @@ mod tests {
         let mut app = App::new(i18n::Lang::En);
 
         assert!(handle_logview_key(&mut app, char_key('c')));
+        assert!(handle_logview_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+        ));
         assert!(handle_logview_key(&mut app, char_key('1')));
         // Too-short hex: commit shows the invalid-hex error and keeps editing.
         for c in ['f', 'f'] {
@@ -666,7 +708,14 @@ mod tests {
         let (dir, _guard) = isolate_config("display");
         let mut app = App::new(i18n::Lang::En);
 
-        // Key 2 toggles PID display through the real logview handler.
+        // Main-window quick toggles are gone: '2' does nothing here.
+        assert!(handle_logview_key(&mut app, char_key('2')));
+        assert!(app.config.show_pid);
+
+        // 'o' opens settings; Display is the default category, so '2' toggles
+        // the PID row through the real handler.
+        assert!(handle_logview_key(&mut app, char_key('o')));
+        assert!(app.show_settings);
         assert!(handle_logview_key(&mut app, char_key('2')));
         assert!(!app.config.show_pid);
         assert!(app.config.show_timestamp);

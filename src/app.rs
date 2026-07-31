@@ -32,6 +32,39 @@ pub enum Focus {
     LogView,
     FilterInput,
 }
+
+/// A tab of the settings screen. Adding a new category only requires
+/// extending this enum, `ALL`, and the label match in `ui.rs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsCategory {
+    Display,
+    Color,
+}
+
+impl SettingsCategory {
+    pub const ALL: [SettingsCategory; 2] = [SettingsCategory::Display, SettingsCategory::Color];
+
+    pub fn next(self) -> SettingsCategory {
+        match self {
+            SettingsCategory::Display => SettingsCategory::Color,
+            SettingsCategory::Color => SettingsCategory::Display,
+        }
+    }
+
+    pub fn prev(self) -> SettingsCategory {
+        match self {
+            SettingsCategory::Display => SettingsCategory::Color,
+            SettingsCategory::Color => SettingsCategory::Display,
+        }
+    }
+
+    pub fn label(self, msgs: &crate::i18n::Messages) -> &'static str {
+        match self {
+            SettingsCategory::Display => msgs.settings_category_display,
+            SettingsCategory::Color => msgs.settings_category_color,
+        }
+    }
+}
 pub struct App {
     pub buffer: LogBuffer,
     pub filter_input: String,
@@ -44,8 +77,6 @@ pub struct App {
     pub palette: crate::config::ColorPalette,
     /// Active preset name (display only; the palette itself is authoritative).
     pub color_preset: crate::config::Preset,
-    /// When true, the color config overlay (c key) is shown between filter and log area.
-    pub show_colors: bool,
     /// Item currently being edited (hex input active), if any.
     pub color_editing: Option<crate::config::ColorItem>,
     /// Hex digits typed so far for the active edit (without '#')
@@ -64,8 +95,10 @@ pub struct App {
     pub filter_bypassed: bool,
     /// When true, the help overlay (h key) is shown between filter and log area.
     pub show_help: bool,
-    /// When true, the options overlay (o key) is shown between filter and log area.
-    pub show_options: bool,
+    /// When true, the settings overlay (o / c keys) is shown between filter and log area.
+    pub show_settings: bool,
+    /// Active tab of the settings overlay.
+    pub settings_category: SettingsCategory,
     /// Localised messages.
     pub msgs: &'static crate::i18n::Messages,
 }
@@ -82,7 +115,6 @@ impl App {
             config,
             palette,
             color_preset,
-            show_colors: false,
             color_editing: None,
             color_input: String::new(),
             color_error: None,
@@ -93,7 +125,8 @@ impl App {
             needs_replay: false,
             filter_bypassed: false,
             show_help: false,
-            show_options: false,
+            show_settings: false,
+            settings_category: SettingsCategory::Display,
             msgs: crate::i18n::messages(lang),
         }
     }
@@ -194,11 +227,12 @@ impl App {
     /// Number of overlay rows to show above the filter bar (0 if none).
     pub fn overlay_rows(&self) -> u16 {
         if self.show_help {
-            13 // title + 11 keybindings + blank line
-        } else if self.show_options {
-            9 // title + 7 configs + blank line
-        } else if self.show_colors {
-            12 // title + preset + 8 items + hint + blank line
+            10 // title + 8 keybindings + blank line
+        } else if self.show_settings {
+            match self.settings_category {
+                SettingsCategory::Display => 10, // title + category + 6 toggles + hint + blank
+                SettingsCategory::Color => 13,   // title + category + preset + 8 items + hint + blank
+            }
         } else {
             0
         }
