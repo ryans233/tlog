@@ -172,6 +172,20 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
 const VIEWPORT_HEIGHT: u16 = 3;
 const MAX_REPLAY: usize = 10_000;
 
+/// Restore the terminal after tlog exits: reset styles, clear the visible
+/// screen and the scrollback the session filled, and park the cursor on the
+/// bottom row so the shell prompt lands in a clean terminal.
+fn restore_terminal<W: std::io::Write>(w: &mut W, term_rows: u16) -> std::io::Result<()> {
+    use std::io::Write;
+    crossterm::execute!(
+        w,
+        crossterm::style::ResetColor,
+        crossterm::cursor::MoveTo(0, term_rows.saturating_sub(1)),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::Purge),
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
@@ -195,7 +209,7 @@ async fn main() -> Result<()> {
 
     // If cursor is near top, push it down so the viewport has room.
     let target_row = term_rows.saturating_sub(VIEWPORT_HEIGHT + 1);
-    if cursor_row < target_row {
+    let result = if cursor_row < target_row {
         for _ in cursor_row..target_row {
             print!("\n");
         }
@@ -212,7 +226,7 @@ async fn main() -> Result<()> {
             term_cols,
             VIEWPORT_HEIGHT,
         ));
-        run_app(&mut terminal, cli, lang).await?;
+        run_app(&mut terminal, cli, lang).await
     } else {
         let cursor_pos = Position::new(cursor_col, cursor_row);
         let backend = ratatui::backend::CrosstermBackend::new(stdout);
@@ -224,14 +238,21 @@ async fn main() -> Result<()> {
             term_cols,
             VIEWPORT_HEIGHT,
         ));
-        run_app(&mut terminal, cli, lang).await?;
-    }
+        run_app(&mut terminal, cli, lang).await
+    };
 
     // ── Cleanup ───────────────────────────────────────────────────────────
+    // Restore the terminal before propagating any error, so nothing tlog
+    // drew remains on screen or in the scrollback after quitting.
+    if let Ok((_, term_rows)) = crossterm::terminal::size() {
+        let mut stdout = std::io::stdout();
+        let _ = restore_terminal(&mut stdout, term_rows);
+    }
     crossterm::terminal::disable_raw_mode()?;
     // Reset scroll region to full screen.
     print!("\x1b[r");
 
+    result?;
     Ok(())
 }
 
@@ -733,6 +754,19 @@ mod tests {
         assert!(text.contains("show_timestamp = true"), "got: {text}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_restore_terminal_clears_screen_and_scrollback() {
+        let mut out = Vec::new();
+        restore_terminal(&mut out, 24).expect("restore should succeed");
+        let bytes = String::from_utf8(out).expect("ansi bytes");
+        assert!(bytes.starts_with("\x1b[0m"), "resets colors first: {bytes:?}");
+        assert!(bytes.contains("\x1b[24;1H"), "cursor parked on bottom row: {bytes:?}");
+        assert!(
+            bytes.ends_with("\x1b[2J\x1b[3J"),
+            "clears screen + scrollback: {bytes:?}"
+        );
     }
 
     #[test]
