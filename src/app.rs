@@ -212,6 +212,7 @@ impl App {
             '6' => self.config.colorize = !self.config.colorize,
             _ => return,
         }
+        self.needs_replay = true; // scrollback must re-render with the new display options
         self.save_config();
     }
 

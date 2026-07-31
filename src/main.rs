@@ -716,9 +716,12 @@ mod tests {
         // the PID row through the real handler.
         assert!(handle_logview_key(&mut app, char_key('o')));
         assert!(app.show_settings);
+        app.needs_replay = false;
         assert!(handle_logview_key(&mut app, char_key('2')));
         assert!(!app.config.show_pid);
         assert!(app.config.show_timestamp);
+        // Display toggles re-render the scrollback immediately (like colors).
+        assert!(app.needs_replay, "display toggle must request a replay");
 
         // Toggle persisted immediately.
         let conf = crate::config::config_path().expect("config path");
