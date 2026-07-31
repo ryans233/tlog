@@ -53,6 +53,8 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
         filter_status(app, msgs),
     );
 
+    // Run-state indicator prepended to the filter title.
+    let (indicator, indicator_style) = run_state_indicator(msgs, app.paused, app.running);
     let block = Block::default()
         .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
         .border_style(if is_focused {
@@ -60,7 +62,10 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
         } else {
             Style::default().fg(Color::DarkGray)
         })
-        .title(msgs.filter_title(&status));
+        .title(Line::from(vec![
+            Span::styled(format!("{} ", indicator), indicator_style),
+            Span::raw(msgs.filter_title(&status)),
+        ]));
     let inner = block.inner(filter_area);
     f.render_widget(block, filter_area);
 
@@ -106,6 +111,21 @@ fn filter_status<'a>(app: &App, msgs: &'a crate::i18n::Messages) -> &'a str {
         msgs.filter_ok
     } else {
         msgs.filter_none
+    }
+}
+
+/// (label, color) of the run-state indicator shown before the filter title.
+fn run_state_indicator(
+    msgs: &crate::i18n::Messages,
+    paused: bool,
+    running: bool,
+) -> (&'static str, Color) {
+    if paused {
+        (msgs.status_paused, Color::Yellow)
+    } else if running {
+        (msgs.status_running, Color::Green)
+    } else {
+        (msgs.status_stopped, Color::Red)
     }
 }
 
@@ -469,6 +489,23 @@ mod tests {
 
     fn line_text(line: &Line<'static>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn test_run_state_indicator() {
+        let msgs = crate::i18n::messages(crate::i18n::Lang::En);
+        assert_eq!(
+            run_state_indicator(msgs, false, true),
+            (msgs.status_running, Color::Green)
+        );
+        assert_eq!(
+            run_state_indicator(msgs, true, true),
+            (msgs.status_paused, Color::Yellow)
+        );
+        assert_eq!(
+            run_state_indicator(msgs, false, false),
+            (msgs.status_stopped, Color::Red)
+        );
     }
 
     #[test]

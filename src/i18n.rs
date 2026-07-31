@@ -46,6 +46,11 @@ pub struct Messages {
     pub filter_title: &'static str,      // " 过滤器 ({}) "
     pub filter_error_prefix: &'static str, // "错误: {}"
 
+    // ── Run-state indicator ─────────────────────────────────────────────
+    pub status_running: &'static str,
+    pub status_paused: &'static str,
+    pub status_stopped: &'static str,
+
     // ── Filter status labels ────────────────────────────────────────────
     pub filter_bypassed: &'static str,
     pub filter_parse_error: &'static str,
@@ -149,6 +154,10 @@ pub const EN: Messages = Messages {
     filter_title: " Filter ({}) ",
     filter_error_prefix: "Error: {}",
 
+    status_running: "RUNNING",
+    status_paused: "PAUSED",
+    status_stopped: "STOPPED",
+
     filter_bypassed: "Bypassed",
     filter_parse_error: "Parse error",
     filter_ok: "Filter OK",
@@ -211,6 +220,10 @@ pub const ZH: Messages = Messages {
     status_bar: "共{}条 | 显示{}条 | {}",
     filter_title: " 过滤器 ({}) ",
     filter_error_prefix: "错误: {}",
+
+    status_running: "运行中",
+    status_paused: "已暂停",
+    status_stopped: "已停止",
 
     filter_bypassed: "已旁路",
     filter_parse_error: "解析错误",
