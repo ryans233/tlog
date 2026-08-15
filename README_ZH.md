@@ -16,6 +16,9 @@
 - **暂停/恢复** — 冻结日志输出以便仔细查看
 - **过滤器旁路** — 按 `g` 临时禁用过滤器（保留输入内容，再按恢复）
 - **多语言** — 界面文本支持中文和英文，根据 `LANG` 环境变量自动检测，也可通过 `--lang` 指定
+- **多设备** — 使用 `-s` / `--serial` 或 `ANDROID_SERIAL` 选择设备，使用 `-b` / `--buffer` 选择日志缓冲区
+- **可靠的日志流** — `--clear` 先清空设备日志，`--exit-on-eof` 在 logcat 停止时退出，`--reconnect` 指数退避自动重连
+- **可选诊断日志** — 仅当设置 `--debug`（或 `TLOG_DEBUG`）时，未解析行才会写入配置目录的 `tlog-rejected.log`，并自动轮转
 - **环形缓冲区** — 10 万条硬上限，内存安全
 
 ## 安装
@@ -43,6 +46,17 @@ tlog --filter 'tag:MainActivity & level:ERROR'
 
 # 自定义命令（Termux 等环境）
 tlog --cmd logcat,-v,threadtime
+# `--cmd` 是完整命令覆盖，不能与 -s/-b/-c 同时使用。
+
+# 选择设备与缓冲区，并先清空设备日志
+tlog -s emulator-5554 -b main,system -c
+
+# logcat 停止时退出 / 断开后自动重连
+tlog --exit-on-eof
+tlog --reconnect
+
+# 将未解析行与读取诊断写入配置目录
+tlog --debug
 
 # 指定语言
 tlog --lang zh
@@ -67,6 +81,8 @@ tlog --lang en
 | `End` / `↓` | 跳到过滤器输入末尾 |
 | `Backspace` / `Delete` | 删除光标前 / 光标处字符（编辑过滤器时） |
 | `Ctrl+U` | 清空过滤器输入（编辑过滤器时） |
+
+> 暂停期间新到达的日志不会被缓冲，而是直接丢弃。
 
 ### 设置界面（`o`）
 

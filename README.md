@@ -16,6 +16,9 @@ A terminal-based Android logcat viewer written in Rust.
 - **Pause/resume** — freeze log output for careful inspection
 - **Filter bypass** — temporarily disable the active filter with `g`, keeping the input intact
 - **Multi-language** — UI strings in English and Chinese, auto-detected from `LANG` or set via `--lang`
+- **Multi-device** — select a device with `-s` / `--serial` or `ANDROID_SERIAL`, and choose log buffers with `-b` / `--buffer`
+- **Resilient feed** — `--clear` flushes the device log first, `--exit-on-eof` quits when logcat stops, and `--reconnect` restarts it with exponential backoff
+- **Opt-in diagnostics** — unparsed lines go to `tlog-rejected.log` in the config directory only when `--debug` (or `TLOG_DEBUG`) is set, with automatic rotation
 - **Ring buffer** — 100,000 entries hard cap, memory-safe
 
 ## Installation
@@ -43,6 +46,17 @@ tlog --filter 'tag:MainActivity & level:ERROR'
 
 # Custom command (e.g. Termux)
 tlog --cmd logcat,-v,threadtime
+# `--cmd` is a full override and cannot be combined with -s/-b/-c.
+
+# Select a device and buffers, clearing the device log first
+tlog -s emulator-5554 -b main,system -c
+
+# Exit when logcat stops / keep reconnecting when it drops
+tlog --exit-on-eof
+tlog --reconnect
+
+# Write rejected lines and reader diagnostics to the config directory
+tlog --debug
 
 # Force language
 tlog --lang en
@@ -67,6 +81,8 @@ tlog --lang zh
 | `End` / `↓` | Jump to the end of the filter input |
 | `Backspace` / `Delete` | Delete before / at the cursor (when editing filter) |
 | `Ctrl+U` | Clear the filter input (when editing filter) |
+
+> While paused, incoming log lines are not buffered and are discarded.
 
 ### Settings screen (`o`)
 
