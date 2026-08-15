@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 use chrono::{Datelike, Timelike};
+use regex::Regex;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, DisplayConfig, Focus, SettingsCategory};
@@ -112,7 +113,7 @@ fn visible_filter_slice(input: &str, cursor: usize, max_cols: usize) -> (&str, u
 pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
     let area = f.area();
     let overlay_rows = app.overlay_rows();
-    let is_focused = app.focus == Focus::FilterInput;
+    let is_focused = app.focus != Focus::LogView;
 
     // Split area: overlay on top, filter bar on bottom
     let filter_area = Rect {
@@ -135,12 +136,19 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
 
     // Build status string
     let msgs = app.msgs;
+    let mut status_filter = filter_status(app, msgs).to_string();
+    if let Some(query) = &app.search_query {
+        status_filter.push(' ');
+        status_filter.push('|');
+        status_filter.push(' ');
+        status_filter.push_str(&msgs.search_status(query));
+    }
     let status = msgs.status_bar(
         app.buffer.len(),
         app.buffer.filtered_len(),
         app.buffer.total_filtered_out as usize,
         app.dropped_messages,
-        filter_status(app, msgs),
+        &status_filter,
     );
 
     // Run-state indicator prepended to the filter title.
@@ -159,14 +167,22 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
     let inner = block.inner(filter_area);
     f.render_widget(block, filter_area);
 
-    // Render filter input text. The visible slice is horizontally scrolled
-    // around the cursor so arrow-key navigation stays visible on narrow
-    // terminals.
-    let prompt = if is_focused { "> " } else { "  " };
+    // Render the active input line. The visible slice is horizontally
+    // scrolled around the cursor so arrow-key navigation stays visible on
+    // narrow terminals.
+    let (prompt, input, cursor) = match app.focus {
+        Focus::LogView => ("  ", app.filter_input.as_str(), app.filter_cursor),
+        Focus::FilterInput => ("> ", app.filter_input.as_str(), app.filter_cursor),
+        Focus::SearchInput => ("/ ", app.search_input.as_str(), app.search_cursor),
+        Focus::FilterName => (
+            app.msgs.filter_name_prompt,
+            app.name_input.as_str(),
+            app.name_cursor,
+        ),
+    };
     let prompt_width = UnicodeWidthStr::width(prompt);
     let max_filter_cols = inner.width.saturating_sub(prompt_width as u16) as usize;
-    let (visible_filter, cursor_col) =
-        visible_filter_slice(&app.filter_input, app.filter_cursor, max_filter_cols);
+    let (visible_filter, cursor_col) = visible_filter_slice(input, cursor, max_filter_cols);
     let display_text = format!("{}{}", prompt, visible_filter);
 
     let text = Paragraph::new(display_text).style(Style::default());
@@ -181,18 +197,40 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
         f.set_cursor_position((rel_cx, rel_cy));
     }
 
-    // Filter error below input
-    if let Some(ref err) = app.filter_error
-        && filter_area.height > 1
-    {
-        let error_area = Rect {
+    // Filter error / one-shot notice / input-mode hint below the input line.
+    if filter_area.height > 1 {
+        let notice_area = Rect {
             x: filter_area.x + 1,
             y: inner.y + inner.height,
             width: filter_area.width.saturating_sub(2),
             height: 1,
         };
-        let error_text = Span::styled(msgs.filter_error(err), Style::default().fg(Color::Red));
-        f.render_widget(Paragraph::new(Line::from(error_text)), error_area);
+        let (text, style) = if let Some(err) = &app.filter_error {
+            (msgs.filter_error(err), Style::default().fg(Color::Red))
+        } else if let Some(message) = &app.status_message {
+            let style = if app.status_is_error {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            (message.clone(), style)
+        } else {
+            match app.focus {
+                Focus::SearchInput => (
+                    msgs.search_hint.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Focus::FilterName => (
+                    msgs.filter_name_hint.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Focus::LogView | Focus::FilterInput => return,
+            }
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, style))),
+            notice_area,
+        );
     }
 }
 
@@ -230,6 +268,7 @@ pub fn format_entry(
     entry: &LogEntry,
     config: &DisplayConfig,
     palette: &ColorPalette,
+    search: Option<&Regex>,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
@@ -280,7 +319,11 @@ pub fn format_entry(
         } else {
             format!("{}: ", entry.tag)
         };
-        spans.push(Span::styled(tag_str, Style::default().fg(palette.tag)));
+        spans.extend(search_highlight_spans(
+            &tag_str,
+            Style::default().fg(palette.tag),
+            search,
+        ));
     }
 
     let msg_style = if config.colorize {
@@ -289,9 +332,36 @@ pub fn format_entry(
         Style::default()
     };
 
-    spans.push(Span::styled(entry.message.clone(), msg_style));
+    spans.extend(search_highlight_spans(&entry.message, msg_style, search));
 
     Line::from(spans)
+}
+
+/// Split `text` into spans, giving every case-insensitive match of `search`
+/// a yellow background while keeping the base foreground/style.
+fn search_highlight_spans(text: &str, base: Style, search: Option<&Regex>) -> Vec<Span<'static>> {
+    let Some(search) = search else {
+        return vec![Span::styled(text.to_string(), base)];
+    };
+    let mut spans = Vec::new();
+    let mut last = 0;
+    for matched in search.find_iter(text) {
+        if matched.start() > last {
+            spans.push(Span::styled(text[last..matched.start()].to_string(), base));
+        }
+        let mut highlight = Style::default()
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        if let Some(fg) = base.fg {
+            highlight = highlight.fg(fg);
+        }
+        spans.push(Span::styled(matched.as_str().to_string(), highlight));
+        last = matched.end();
+    }
+    if last < text.len() {
+        spans.push(Span::styled(text[last..].to_string(), base));
+    }
+    spans
 }
 
 fn level_style(level: LogLevel, palette: &ColorPalette) -> Style {
@@ -337,6 +407,18 @@ fn help_lines(msgs: &crate::i18n::Messages) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("  g           ", key_style),
             Span::styled(msgs.help_bypass, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  /           ", key_style),
+            Span::styled(msgs.help_search, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  E           ", key_style),
+            Span::styled(msgs.help_export, desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  V/D/I/W/E   ", key_style),
+            Span::styled(msgs.help_quick_level, desc),
         ]),
         Line::from(vec![
             Span::styled("  Tab         ", key_style),
@@ -575,7 +657,7 @@ mod tests {
         palette.tag = Color::Rgb(0x12, 0x34, 0x56);
         palette.timestamp = Color::Rgb(0x65, 0x43, 0x21);
         let entry = make_entry(LogLevel::Error, "MyTag", "boom");
-        let line = format_entry(&entry, &DisplayConfig::default(), &palette);
+        let line = format_entry(&entry, &DisplayConfig::default(), &palette, None);
         // Span order with all toggles on: 0=timestamp, 1=pid, 2=tid, 3=level, 4=tag, 5=message.
         assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(0x65, 0x43, 0x21)));
         assert_eq!(line.spans[3].style.fg, Some(Color::Rgb(0xFF, 0x30, 0x30)));
@@ -590,7 +672,7 @@ mod tests {
             colorize: false,
             ..Default::default()
         };
-        let line = format_entry(&entry, &config, &ColorPalette::default());
+        let line = format_entry(&entry, &config, &ColorPalette::default(), None);
         assert_eq!(line.spans[5].style.fg, None);
     }
 
@@ -632,6 +714,42 @@ mod tests {
         let lines = settings_lines(&app);
         assert_eq!(lines.len(), 13);
         assert!(line_text(&lines[1]).contains(app.msgs.settings_category_color));
+    }
+
+    #[test]
+    fn test_help_lines_structure() {
+        let app = App::new(crate::i18n::Lang::En);
+        let lines = help_lines(app.msgs);
+        assert_eq!(lines.len(), 13);
+        assert_eq!(lines[0].spans[0].content.as_ref(), app.msgs.help_title);
+        assert!(line_text(&lines[7]).contains(" /"));
+        assert!(line_text(&lines[7]).contains(app.msgs.help_search));
+        assert!(line_text(&lines[8]).contains(app.msgs.help_export));
+        assert!(line_text(&lines[9]).contains("V/D/I/W/E"));
+    }
+
+    #[test]
+    fn test_format_entry_highlights_search_matches() {
+        let entry = make_entry(LogLevel::Error, "CrashTag", "allocation failed: OOM");
+        let search = Regex::new("(?i)oom").unwrap();
+        let line = format_entry(
+            &entry,
+            &DisplayConfig::default(),
+            &ColorPalette::default(),
+            Some(&search),
+        );
+        let highlighted: Vec<_> = line
+            .spans
+            .iter()
+            .filter(|span| span.style.bg == Some(Color::Yellow))
+            .collect();
+        assert_eq!(highlighted.len(), 1, "exactly one OOM match: {line:?}");
+        assert_eq!(highlighted[0].content.as_ref(), "OOM");
+        assert_eq!(
+            highlighted[0].style.fg,
+            Some(Color::Rgb(0xFF, 0x00, 0x00)),
+            "highlight keeps the level foreground"
+        );
     }
 
     #[test]

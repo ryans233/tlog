@@ -1,9 +1,11 @@
 mod app;
 mod buffer;
 mod config;
+mod export;
 mod filter;
 mod i18n;
 mod logcat;
+mod named_filters;
 mod rejected;
 mod scrollback;
 mod ui;
@@ -15,6 +17,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::layout::{Position, Rect};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -52,6 +55,12 @@ struct Cli {
     /// Write rejected lines and reader diagnostics to the config-dir rejected log.
     #[arg(long)]
     debug: bool,
+    /// Play back a log file instead of streaming from `adb logcat`.
+    ///
+    /// Offline playback reuses the same parser/UI pipeline and exits when EOF
+    /// is reached, which also makes it useful for CI demos and recordings.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["cmd", "serial", "buffer", "clear", "reconnect"])]
+    file: Option<PathBuf>,
     /// Pre-populate and apply a filter on startup.
     #[arg(long)]
     filter: Option<String>,
@@ -131,6 +140,8 @@ fn env_flag_enabled(name: &str) -> bool {
 const SEED_TIMEOUT: Duration = Duration::from_secs(3);
 const CLEAR_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
+/// Coalesce terminal resize bursts before the expensive clear + replay.
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(75);
 
 /// Run `adb shell ps` to seed the PID→package map.
 ///
@@ -245,6 +256,111 @@ fn spawn_logcat_feed(
     LogcatFeed { task, rx }
 }
 
+/// Cumulative channel-drop counter shared by the logcat and file readers.
+#[derive(Default)]
+struct DropTracker {
+    dropped: u64,
+    last_reported: u64,
+}
+
+impl DropTracker {
+    /// Handle a full channel. Returns `false` if the receiver is gone.
+    fn note_full(&mut self, tx: &mpsc::Sender<Message>) -> bool {
+        self.dropped += 1;
+        if self.dropped - self.last_reported >= 1000 {
+            match tx.try_send(Message::Dropped(self.dropped)) {
+                Ok(()) => self.last_reported = self.dropped,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return false,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+            }
+        }
+        true
+    }
+}
+
+/// Parse and route one raw log line.
+///
+/// Shared by the live logcat reader and `--file` offline playback so both
+/// sources get identical parsing, lifecycle tracking, and backpressure
+/// behaviour. Returns `false` when the UI receiver is gone.
+fn process_log_line(
+    line: &str,
+    tx: &mpsc::Sender<Message>,
+    rejected: &rejected::RejectedLog,
+    drops: &mut DropTracker,
+) -> bool {
+    if let Some(entry) = parse_line(line) {
+        // Check for ActivityManager lifecycle events
+        if entry.tag == "ActivityManager"
+            && let Some(event) = logcat::parse_lifecycle(&entry.tag, &entry.message)
+        {
+            match event {
+                logcat::LifecycleEvent::Started { pid, package } => {
+                    let _ = tx.try_send(Message::ProcessStarted { pid, package });
+                }
+                logcat::LifecycleEvent::Died { pid } => {
+                    let _ = tx.try_send(Message::ProcessDied { pid });
+                }
+            }
+        }
+
+        match tx.try_send(Message::NewEntry(entry)) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => drops.note_full(tx),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    } else {
+        // Line didn't match expected format — append to the opt-in rejected log.
+        rejected.unparsed(line);
+        true
+    }
+}
+
+/// Spawn an offline `--file` reader with the same message protocol as logcat.
+fn spawn_file_feed(path: PathBuf, rejected: rejected::RejectedLog) -> LogcatFeed {
+    let (tx, rx) = mpsc::channel::<Message>(1024);
+    let task = tokio::spawn(async move {
+        run_file_feed(path, rejected, tx).await;
+    });
+    LogcatFeed { task, rx }
+}
+
+/// Stream a log file line by line, then report EOF as `LogcatDied`.
+async fn run_file_feed(path: PathBuf, rejected: rejected::RejectedLog, tx: mpsc::Sender<Message>) {
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(err) => {
+            rejected.log(&format!("file open failed: {}", err));
+            let _ = tx.send(Message::LogcatDied).await;
+            return;
+        }
+    };
+    if tx.send(Message::LogcatStarted).await.is_err() {
+        return;
+    }
+
+    let mut reader = BufReader::new(file);
+    let mut buf: Vec<u8> = Vec::new();
+    let mut drops = DropTracker::default();
+    loop {
+        match read_until_limited(&mut reader, &mut buf, b'\n', MAX_LOG_LINE_BYTES).await {
+            Ok(0) => break,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf);
+                let line = line.trim_end_matches(['\n', '\r']);
+                if !process_log_line(line, &tx, &rejected, &mut drops) {
+                    return;
+                }
+            }
+            Err(err) => {
+                rejected.log(&format!("file reader: read error: {}", err));
+                break;
+            }
+        }
+    }
+    let _ = tx.send(Message::LogcatDied).await;
+}
+
 /// Own the logcat subprocess lifecycle: parse stdout, report status changes,
 /// and optionally reconnect with exponential backoff.
 async fn run_logcat_feed(
@@ -258,8 +374,7 @@ async fn run_logcat_feed(
         let _ = tx.send(Message::LogcatDied).await;
         return;
     }
-    let mut local_dropped: u64 = 0;
-    let mut last_reported_dropped: u64 = 0;
+    let mut drops = DropTracker::default();
     let mut attempt: u32 = 0;
 
     loop {
@@ -306,38 +421,8 @@ async fn run_logcat_feed(
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf);
                     let line = line.trim_end_matches(['\n', '\r']);
-                    if let Some(entry) = parse_line(line) {
-                        // Check for ActivityManager lifecycle events
-                        if entry.tag == "ActivityManager"
-                            && let Some(event) = logcat::parse_lifecycle(&entry.tag, &entry.message)
-                        {
-                            match event {
-                                logcat::LifecycleEvent::Started { pid, package } => {
-                                    let _ = tx.try_send(Message::ProcessStarted { pid, package });
-                                }
-                                logcat::LifecycleEvent::Died { pid } => {
-                                    let _ = tx.try_send(Message::ProcessDied { pid });
-                                }
-                            }
-                        }
-
-                        match tx.try_send(Message::NewEntry(entry)) {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                local_dropped += 1;
-                                if local_dropped - last_reported_dropped >= 1000 {
-                                    let _ = tx.try_send(Message::Dropped(local_dropped));
-                                    last_reported_dropped = local_dropped;
-                                }
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                return;
-                            }
-                        }
-                    } else {
-                        // Line didn't match expected format — append to the
-                        // opt-in rejected log.
-                        rejected.unparsed(line);
+                    if !process_log_line(line, &tx, &rejected, &mut drops) {
+                        return;
                     }
                 }
                 Err(err) => {
@@ -358,7 +443,6 @@ async fn run_logcat_feed(
         attempt = attempt.saturating_add(1);
     }
 }
-
 /// Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s.
 fn reconnect_delay(attempt: u32) -> Duration {
     let shift = attempt.min(5);
@@ -387,16 +471,19 @@ async fn main() -> Result<()> {
     let lang = i18n::resolve(cli.lang.as_deref());
     let msgs = i18n::messages(lang);
 
-    let logcat_args = cli.logcat_args();
-    let logcat_bin = logcat_args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "adb".to_string());
+    // Offline file playback does not need adb on PATH.
+    if cli.file.is_none() {
+        let logcat_args = cli.logcat_args();
+        let logcat_bin = logcat_args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "adb".to_string());
 
-    // Check that the logcat binary is available.
-    if which::which(&logcat_bin).is_err() {
-        eprintln!("{}", msgs.adb_not_found_full(&logcat_bin));
-        std::process::exit(1);
+        // Check that the logcat binary is available.
+        if which::which(&logcat_bin).is_err() {
+            eprintln!("{}", msgs.adb_not_found_full(&logcat_bin));
+            std::process::exit(1);
+        }
     }
 
     let rejected_log = rejected::RejectedLog::new(cli.debug_enabled());
@@ -465,6 +552,7 @@ async fn run_app(
     rejected_log: rejected::RejectedLog,
 ) -> Result<()> {
     let mut app = App::new(lang);
+    let file_mode = cli.file.is_some();
     let logcat_args = cli.logcat_args();
     let adb = logcat_args
         .first()
@@ -480,17 +568,22 @@ async fn run_app(
 
     // Seed the PID→package map in the background with a timeout. The UI and
     // logcat stream start immediately; the map is merged when the task lands.
-    let seed_adb = adb.clone();
-    let seed_serial = serial.clone();
-    let mut seed_task = tokio::spawn(async move {
-        let mut map = HashMap::new();
-        let _ = time::timeout(
-            SEED_TIMEOUT,
-            seed_pid_map(&mut map, &seed_adb, seed_serial.as_deref()),
-        )
-        .await;
-        map
-    });
+    // Offline file playback skips the adb probe entirely.
+    let mut seed_task = if file_mode {
+        tokio::spawn(async move { HashMap::new() })
+    } else {
+        let seed_adb = adb.clone();
+        let seed_serial = serial.clone();
+        tokio::spawn(async move {
+            let mut map = HashMap::new();
+            let _ = time::timeout(
+                SEED_TIMEOUT,
+                seed_pid_map(&mut map, &seed_adb, seed_serial.as_deref()),
+            )
+            .await;
+            map
+        })
+    };
     let mut seed_done = false;
 
     // Apply startup filter if provided
@@ -502,7 +595,11 @@ async fn run_app(
         replay_filtered(terminal, &app)?;
     }
 
-    let feed = spawn_logcat_feed(&logcat_args, cli.reconnect, rejected_log);
+    let feed = if let Some(path) = &cli.file {
+        spawn_file_feed(path.clone(), rejected_log)
+    } else {
+        spawn_logcat_feed(&logcat_args, cli.reconnect, rejected_log)
+    };
     let mut feed_task = Some(feed.task);
     let mut msg_rx = feed.rx;
     let mut feed_closed = false;
@@ -510,8 +607,14 @@ async fn run_app(
 
     let mut ticker = time::interval(Duration::from_millis(250));
     let mut event_stream = event::EventStream::new();
+    // Resize events are coalesced for `RESIZE_DEBOUNCE` before clearing and
+    // replaying scrollback, so window-drag resize storms don't replay 10k
+    // lines per event.
+    let mut resize_pending: Option<(u16, u16)> = None;
+    let mut resize_deadline: Option<time::Instant> = None;
 
     let result: Result<()> = loop {
+        let resize_timer = resize_deadline.map(time::sleep_until);
         tokio::select! {
             Some(Ok(event)) = event_stream.next() => {
                 match event {
@@ -521,13 +624,24 @@ async fn run_app(
                         }
                     }
                     Event::Resize(cols, rows) => {
+                        // Re-home the viewport immediately so drawing always uses
+                        // a buffer matching the terminal size, but defer the
+                        // expensive clear + replay until the resize burst stops.
                         let vh = app.viewport_height();
-                        let new_area = Rect::new(0, rows.saturating_sub(vh), cols, vh);
-                        terminal.clear_scrollback_and_visible_screen_ansi()?;
-                        terminal.set_viewport_area(new_area);
-                        replay_filtered(terminal, &app)?;
+                        terminal.set_viewport_area(Rect::new(0, rows.saturating_sub(vh), cols, vh));
+                        resize_pending = Some((cols, rows));
+                        resize_deadline = Some(time::Instant::now() + RESIZE_DEBOUNCE);
                     }
                     _ => {}
+                }
+            }
+            _ = resize_wait(resize_timer), if resize_deadline.is_some() => {
+                resize_deadline = None;
+                if let Some((cols, rows)) = resize_pending.take() {
+                    terminal.clear_scrollback_and_visible_screen_ansi()?;
+                    let vh = app.viewport_height();
+                    terminal.set_viewport_area(Rect::new(0, rows.saturating_sub(vh), cols, vh));
+                    replay_filtered(terminal, &app)?;
                 }
             }
             seed = &mut seed_task, if !seed_done => {
@@ -543,7 +657,7 @@ async fn run_app(
                     }
                     Some(message) => {
                         let feed_died = matches!(message, Message::LogcatDied);
-                        let exit_on_eof = feed_died && cli.exit_on_eof;
+                        let exit_on_eof = feed_died && (cli.exit_on_eof || file_mode);
                         app.dispatch(message);
                         if feed_died && !cli.reconnect {
                             // Keep the UI open in STOPPED state without busy-polling
@@ -565,7 +679,7 @@ async fn run_app(
                 app.dispatch(Message::Tick);
             }
         }
-        // Handle filter change: clear scrollback and replay.
+        // Handle filter/search change: clear scrollback and replay.
         if app.needs_replay {
             // Replay covers every entry already in the buffer; pending lines
             // would otherwise be inserted after the replay and duplicate them.
@@ -601,6 +715,16 @@ async fn run_app(
 
     result
 }
+/// Wait for a pending resize debounce timer, or sleep forever if none exists.
+///
+/// The `None` arm lets the select branch keep the same shape whether or not a
+/// resize is pending; the branch guard prevents it from ever being polled.
+async fn resize_wait(timer: Option<time::Sleep>) {
+    match timer {
+        Some(timer) => timer.await,
+        None => futures::future::pending::<()>().await,
+    }
+}
 
 /// Replay all filtered entries into scrollback (for filter changes / resize).
 fn replay_filtered(
@@ -618,7 +742,12 @@ fn replay_filtered(
 
     for pos in start..total {
         if let Some((_, entry)) = app.buffer.get_filtered(pos) {
-            batch.push(ui::format_entry(entry, &app.config, &app.palette));
+            batch.push(ui::format_entry(
+                entry,
+                &app.config,
+                &app.palette,
+                app.search_regex.as_ref(),
+            ));
         }
         if batch.len() >= 256 {
             insert_log_lines(terminal, &batch)?;
@@ -636,6 +765,8 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
     match app.focus {
         Focus::LogView => handle_logview_key(app, key),
         Focus::FilterInput => handle_filter_key(app, key),
+        Focus::SearchInput => handle_search_key(app, key),
+        Focus::FilterName => handle_filter_name_key(app, key),
     }
 }
 
@@ -666,6 +797,21 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Char('g') => {
             app.toggle_filter_bypass();
         }
+        // Search input (also re-opens with the current query pre-filled).
+        KeyCode::Char('/') => {
+            app.begin_search();
+        }
+        // Export the current filtered view (uppercase E; lowercase e is
+        // the quick ERROR level key).
+        KeyCode::Char('E') => {
+            app.export_filtered();
+        }
+        // Android Studio-style quick level filters.
+        KeyCode::Char('v') => app.quick_level('v'),
+        KeyCode::Char('d') => app.quick_level('d'),
+        KeyCode::Char('i') => app.quick_level('i'),
+        KeyCode::Char('w') => app.quick_level('w'),
+        KeyCode::Char('e') => app.quick_level('e'),
         KeyCode::Tab => {
             app.focus = Focus::FilterInput;
             app.filter_move_end();
@@ -792,10 +938,31 @@ fn apply_preset(app: &mut App, preset: crate::config::Preset) {
 }
 
 fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
-    // Ctrl+U must be checked before Char(c) to avoid unreachable pattern
-    if key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.filter_clear();
-        return true;
+    // Ctrl combos must be checked before Char(c) to avoid unreachable patterns.
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('a') => {
+                app.filter_move_start();
+                return true;
+            }
+            KeyCode::Char('e') => {
+                app.filter_move_end();
+                return true;
+            }
+            KeyCode::Char('u') => {
+                app.filter_clear();
+                return true;
+            }
+            KeyCode::Char('w') => {
+                app.filter_delete_word_before();
+                return true;
+            }
+            KeyCode::Char('s') => {
+                app.begin_filter_save();
+                return true;
+            }
+            _ => {}
+        }
     }
 
     match key.code {
@@ -808,6 +975,7 @@ fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
         }
         KeyCode::Enter => {
             app.apply_filter();
+            app.record_filter_history();
             app.focus = Focus::LogView;
         }
         KeyCode::Char(c) => {
@@ -821,13 +989,105 @@ fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
         }
         KeyCode::Left => app.filter_move_left(),
         KeyCode::Right => app.filter_move_right(),
-        KeyCode::Up | KeyCode::Home => app.filter_move_start(),
-        KeyCode::Down | KeyCode::End => app.filter_move_end(),
+        KeyCode::Home => app.filter_move_start(),
+        KeyCode::End => app.filter_move_end(),
+        KeyCode::Up => app.filter_history_up(),
+        KeyCode::Down => app.filter_history_down(),
         _ => {}
     }
     true
 }
 
+fn handle_search_key(app: &mut App, key: event::KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('a') => {
+                app.search_move_start();
+                return true;
+            }
+            KeyCode::Char('e') => {
+                app.search_move_end();
+                return true;
+            }
+            KeyCode::Char('u') => {
+                app.search_clear();
+                return true;
+            }
+            KeyCode::Char('w') => {
+                app.search_delete_word_before();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Tab => {
+            // Cancel this search edit; a previously applied highlight stays.
+            app.focus = Focus::LogView;
+        }
+        KeyCode::Enter => {
+            app.apply_search();
+            app.focus = Focus::LogView;
+        }
+        KeyCode::Char(c) => app.search_insert_char(c),
+        KeyCode::Backspace => app.search_backspace(),
+        KeyCode::Delete => app.search_delete(),
+        KeyCode::Left => app.search_move_left(),
+        KeyCode::Right => app.search_move_right(),
+        KeyCode::Up | KeyCode::Home => app.search_move_start(),
+        KeyCode::Down | KeyCode::End => app.search_move_end(),
+        _ => {}
+    }
+    true
+}
+
+fn handle_filter_name_key(app: &mut App, key: event::KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('a') => {
+                app.name_move_start();
+                return true;
+            }
+            KeyCode::Char('e') => {
+                app.name_move_end();
+                return true;
+            }
+            KeyCode::Char('u') => {
+                app.name_clear();
+                return true;
+            }
+            KeyCode::Char('w') => {
+                app.name_delete_word_before();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Tab => {
+            app.focus = Focus::FilterInput;
+            app.filter_move_end();
+        }
+        KeyCode::Enter => {
+            app.save_named_filter();
+            if !app.status_is_error {
+                app.focus = Focus::FilterInput;
+                app.filter_move_end();
+            }
+        }
+        KeyCode::Char(c) => app.name_insert_char(c),
+        KeyCode::Backspace => app.name_backspace(),
+        KeyCode::Delete => app.name_delete(),
+        KeyCode::Left => app.name_move_left(),
+        KeyCode::Right => app.name_move_right(),
+        KeyCode::Home => app.name_move_start(),
+        KeyCode::End => app.name_move_end(),
+        _ => {}
+    }
+    true
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,6 +1169,63 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_file_playback_and_conflicts() {
+        let cli = Cli::try_parse_from(["tlog", "--file", "sample.log"]).expect("cli parses");
+        assert_eq!(
+            cli.file.as_deref(),
+            Some(std::path::Path::new("sample.log"))
+        );
+
+        // Offline playback owns the source; live logcat options conflict.
+        assert!(Cli::try_parse_from(["tlog", "--file", "a.log", "--serial", "ABC"]).is_err());
+        assert!(Cli::try_parse_from(["tlog", "--file", "a.log", "--buffer", "main"]).is_err());
+        assert!(Cli::try_parse_from(["tlog", "--file", "a.log", "--reconnect"]).is_err());
+        assert!(Cli::try_parse_from(["tlog", "--file", "a.log", "--filter", "level:E"]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_file_feed_parses_lines_and_reports_eof() {
+        let path = std::env::temp_dir().join(format!("tlog-file-feed-{}.log", std::process::id()));
+        std::fs::write(
+            &path,
+            "07-27 10:15:30.123  1234  5678 I MyTag: hello
+--------- beginning of main
+",
+        )
+        .expect("write fixture");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let rejected = rejected::RejectedLog::new(false);
+        let task = tokio::spawn(run_file_feed(path.clone(), rejected, tx));
+
+        assert!(matches!(rx.recv().await, Some(Message::LogcatStarted)));
+        match rx.recv().await {
+            Some(Message::NewEntry(entry)) => {
+                assert_eq!(entry.pid, 1234);
+                assert_eq!(entry.tag, "MyTag");
+                assert_eq!(entry.message, "hello");
+            }
+            other => panic!("expected NewEntry, got {other:?}"),
+        }
+        assert!(matches!(rx.recv().await, Some(Message::LogcatDied)));
+        task.await.expect("file feed joins");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_run_file_feed_reports_open_errors() {
+        let path =
+            std::env::temp_dir().join(format!("tlog-file-feed-missing-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let rejected = rejected::RejectedLog::new(false);
+        let task = tokio::spawn(run_file_feed(path, rejected, tx));
+        assert!(matches!(rx.recv().await, Some(Message::LogcatDied)));
+        task.await.expect("file feed joins");
+    }
+
+    #[test]
     fn test_reconnect_delay_backoff() {
         assert_eq!(reconnect_delay(0), Duration::from_secs(1));
         assert_eq!(reconnect_delay(1), Duration::from_secs(2));
@@ -979,19 +1296,13 @@ mod tests {
         app.filter_input = "ab".to_string();
         app.filter_cursor = 0;
 
-        // Right moves one character at a time; Up/Down jump to start/end.
+        // Right moves one character at a time; Home/End jump to start/end.
         assert!(handle_filter_key(&mut app, code_key(KeyCode::Right)));
         assert_eq!(app.filter_cursor, 1);
-        assert!(handle_filter_key(&mut app, code_key(KeyCode::Down)));
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::End)));
         assert_eq!(app.filter_cursor, 2);
         assert!(handle_filter_key(&mut app, code_key(KeyCode::Left)));
         assert_eq!(app.filter_cursor, 1);
-        assert!(handle_filter_key(&mut app, code_key(KeyCode::Up)));
-        assert_eq!(app.filter_cursor, 0);
-
-        // Home/End map to the same start/end movement.
-        assert!(handle_filter_key(&mut app, code_key(KeyCode::End)));
-        assert_eq!(app.filter_cursor, 2);
         assert!(handle_filter_key(&mut app, code_key(KeyCode::Home)));
         assert_eq!(app.filter_cursor, 0);
 
@@ -1003,6 +1314,90 @@ mod tests {
         assert!(handle_filter_key(&mut app, code_key(KeyCode::Backspace)));
         assert_eq!(app.filter_input, "ab");
         assert_eq!(app.filter_cursor, 1);
+    }
+
+    #[test]
+    fn test_filter_ctrl_keys_and_history() {
+        let mut app = App::new_for_tests(i18n::Lang::En);
+        app.focus = Focus::FilterInput;
+        for c in "tag:Foo".chars() {
+            app.filter_insert_char(c);
+        }
+        // Ctrl+A / Ctrl+E move to start/end.
+        let ctrl_a = event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        let ctrl_e = event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        let ctrl_w = event::KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(handle_filter_key(&mut app, ctrl_a));
+        assert_eq!(app.filter_cursor, 0);
+        assert!(handle_filter_key(&mut app, ctrl_e));
+        assert_eq!(app.filter_cursor, app.filter_input.len());
+        // Ctrl+W deletes the previous whitespace-delimited word.
+        assert!(handle_filter_key(&mut app, ctrl_w));
+        assert_eq!(app.filter_input, "");
+        assert_eq!(app.filter_cursor, 0);
+
+        // Enter applies and records history; Up/Down then navigate it.
+        app.filter_input = "tag:Bar".to_string();
+        assert!(handle_filter_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        assert_eq!(app.focus, Focus::LogView);
+        assert_eq!(app.filter_history, ["tag:Bar"]);
+        app.focus = Focus::FilterInput;
+        app.filter_input = "tag:Baz".to_string();
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Up)));
+        assert_eq!(app.filter_input, "tag:Bar");
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Down)));
+        assert_eq!(app.filter_input, "tag:Baz", "Down restores the draft");
+    }
+
+    #[test]
+    fn test_search_and_name_input_modes() {
+        let mut app = App::new_for_tests(i18n::Lang::En);
+
+        // '/' opens search; typed text is applied with Enter.
+        assert!(handle_logview_key(&mut app, char_key('/')));
+        assert_eq!(app.focus, Focus::SearchInput);
+        for c in "oom".chars() {
+            assert!(handle_key(&mut app, char_key(c)));
+        }
+        assert!(handle_key(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        ));
+        assert_eq!(app.focus, Focus::LogView);
+        assert_eq!(app.search_query.as_deref(), Some("oom"));
+        assert!(app.search_regex.is_some());
+        assert!(app.needs_replay);
+
+        // Ctrl+S in filter mode opens the save-as prompt; Esc returns.
+        app.focus = Focus::FilterInput;
+        app.filter_input = "level:E".to_string();
+        let ctrl_s = event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(handle_filter_key(&mut app, ctrl_s));
+        assert_eq!(app.focus, Focus::FilterName);
+        assert_eq!(app.name_target, "level:E");
+        assert!(handle_filter_name_key(&mut app, code_key(KeyCode::Esc)));
+        assert_eq!(app.focus, Focus::FilterInput);
+    }
+
+    #[test]
+    fn test_quick_level_and_export_keys() {
+        let mut app = App::new_for_tests(i18n::Lang::En);
+
+        // Quick level keys apply immediately from the log view.
+        assert!(handle_logview_key(&mut app, char_key('e')));
+        assert_eq!(app.filter_input, "level:E");
+        assert!(app.active_filter.is_some());
+
+        // Uppercase E exports instead of adding a level.
+        assert!(handle_logview_key(&mut app, char_key('E')));
+        assert!(
+            app.status_message.is_some(),
+            "empty export reports a notice"
+        );
+        assert_eq!(app.status_message.as_deref(), Some(app.msgs.export_empty));
     }
 
     #[test]
@@ -1150,6 +1545,37 @@ mod tests {
         let text = std::fs::read_to_string(&conf).expect("config file written");
         assert!(text.contains("show_pid = false"), "got: {text}");
         assert!(text.contains("show_timestamp = true"), "got: {text}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_named_filter_save_persists_and_resolves() {
+        let (dir, _guard) = isolate_config("named-filter");
+        let mut app = App::new(i18n::Lang::En);
+
+        app.filter_input = "tag:Foo".to_string();
+        app.begin_filter_save();
+        app.name_input = "foo".to_string();
+        app.save_named_filter();
+        assert!(!app.status_is_error, "{:?}", app.status_message);
+        assert_eq!(
+            app.named_filters.get("foo").map(String::as_str),
+            Some("tag:Foo")
+        );
+
+        // Persisted next to config.conf and loadable by a fresh app.
+        let path = crate::named_filters::config_path().expect("named filters path");
+        let text = std::fs::read_to_string(&path).expect("filters.conf written");
+        assert!(text.contains("foo	tag:Foo"), "got: {text:?}");
+        let reloaded = crate::named_filters::load_from(&path);
+        assert_eq!(reloaded.get("foo").map(String::as_str), Some("tag:Foo"));
+
+        // `name:foo` now compiles through the saved filter.
+        app.filter_input = "name:foo".to_string();
+        app.apply_filter();
+        assert_eq!(app.filter_error, None);
+        assert!(app.active_filter.is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,8 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+use regex::Regex;
 
 use crate::buffer::LogBuffer;
 use crate::filter::{self, Expr};
 use crate::logcat::Message;
+
+/// Maximum number of applied filter expressions kept for Up/Down history.
+const MAX_FILTER_HISTORY: usize = 100;
 
 /// Controls which fields are shown in the log display.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +36,8 @@ impl Default for DisplayConfig {
 pub enum Focus {
     LogView,
     FilterInput,
+    SearchInput,
+    FilterName,
 }
 
 /// A tab of the settings screen. Adding a new category only requires
@@ -70,6 +77,29 @@ pub struct App {
     pub filter_input: String,
     /// Cursor byte offset inside `filter_input`; always kept on a UTF-8 char boundary.
     pub filter_cursor: usize,
+    /// Successfully applied filter expressions, oldest first (Up/Down history).
+    pub filter_history: Vec<String>,
+    /// `Some(i)` while navigating `filter_history`; `None` while editing freely.
+    pub history_index: Option<usize>,
+    /// Draft preserved when Up-arrow navigation starts, restored by Down-arrow.
+    pub history_draft: String,
+    /// Search query currently being typed (`/` mode).
+    pub search_input: String,
+    pub search_cursor: usize,
+    /// Active search query for display (empty search clears highlighting).
+    pub search_query: Option<String>,
+    /// Case-insensitive matcher compiled once when the search is applied.
+    pub search_regex: Option<Regex>,
+    /// Saved named filters (name → filter expression), persisted next to config.
+    pub named_filters: BTreeMap<String, String>,
+    /// Name currently being typed in the save-filter-as mode.
+    pub name_input: String,
+    pub name_cursor: usize,
+    /// Filter expression being saved by the save-filter-as mode.
+    pub name_target: String,
+    /// One-shot notice shown below the filter bar (export/save results).
+    pub status_message: Option<String>,
+    pub status_is_error: bool,
     pub active_filter: Option<Expr>,
     pub filter_error: Option<String>,
     pub running: bool,
@@ -120,6 +150,19 @@ impl App {
             buffer: LogBuffer::new(),
             filter_input: String::new(),
             filter_cursor: 0,
+            filter_history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
+            search_input: String::new(),
+            search_cursor: 0,
+            search_query: None,
+            search_regex: None,
+            named_filters: crate::named_filters::load(),
+            name_input: String::new(),
+            name_cursor: 0,
+            name_target: String::new(),
+            status_message: None,
+            status_is_error: false,
             active_filter: None,
             filter_error: None,
             running: false,
@@ -147,12 +190,15 @@ impl App {
     /// tests independent of `XDG_CONFIG_HOME`.
     #[cfg(test)]
     pub(crate) fn new_for_tests(lang: crate::i18n::Lang) -> Self {
-        Self::new_with(
+        let mut app = Self::new_with(
             lang,
             crate::config::ColorPalette::default(),
             crate::config::Preset::Default,
             DisplayConfig::default(),
-        )
+        );
+        // Keep tests independent of the user's saved filters file.
+        app.named_filters.clear();
+        app
     }
 
     /// Dispatch a message from the logcat reader or timer.
@@ -173,7 +219,12 @@ impl App {
                     self.buffer.push(entry.clone(), eff_filter);
                     // Only format and queue for scrollback if the entry passes the filter.
                     if eff_filter.is_none_or(|f| f.evaluate(&entry)) {
-                        let line = crate::ui::format_entry(&entry, &self.config, &self.palette);
+                        let line = crate::ui::format_entry(
+                            &entry,
+                            &self.config,
+                            &self.palette,
+                            self.search_regex.as_ref(),
+                        );
                         self.pending_log_lines.push(line);
                     }
                 }
@@ -229,7 +280,7 @@ impl App {
             return;
         }
 
-        match filter::compile(&self.filter_input, self.msgs) {
+        match filter::compile_with_named(&self.filter_input, self.msgs, &self.named_filters) {
             Ok(expr) => {
                 self.filter_error = None;
                 self.buffer.rebuild_filtered(Some(&expr));
@@ -244,95 +295,299 @@ impl App {
         self.needs_replay = true;
     }
 
-    /// Clamp the filter cursor onto the nearest valid UTF-8 char boundary.
-    fn clamp_filter_cursor(&mut self) {
-        if self.filter_cursor > self.filter_input.len() {
-            self.filter_cursor = self.filter_input.len();
-        }
-        while self.filter_cursor > 0 && !self.filter_input.is_char_boundary(self.filter_cursor) {
-            self.filter_cursor -= 1;
-        }
-    }
-
     /// Move the filter cursor one character to the left.
     pub fn filter_move_left(&mut self) {
-        self.clamp_filter_cursor();
-        if self.filter_cursor == 0 {
-            return;
-        }
-        let mut prev = 0;
-        for (i, _) in self.filter_input.char_indices() {
-            if i >= self.filter_cursor {
-                break;
-            }
-            prev = i;
-        }
-        self.filter_cursor = prev;
+        input_move_left(&self.filter_input, &mut self.filter_cursor);
     }
 
     /// Move the filter cursor one character to the right.
     pub fn filter_move_right(&mut self) {
-        self.clamp_filter_cursor();
-        if self.filter_cursor == self.filter_input.len() {
-            return;
-        }
-        if let Some(c) = self.filter_input[self.filter_cursor..].chars().next() {
-            self.filter_cursor += c.len_utf8();
-        }
+        input_move_right(&self.filter_input, &mut self.filter_cursor);
     }
 
-    /// Move the filter cursor to the start (also used by the Up arrow).
+    /// Move the filter cursor to the start (Home / Ctrl+A).
     pub fn filter_move_start(&mut self) {
         self.filter_cursor = 0;
     }
 
-    /// Move the filter cursor to the end (also used by the Down arrow).
+    /// Move the filter cursor to the end (End / Ctrl+E).
     pub fn filter_move_end(&mut self) {
         self.filter_cursor = self.filter_input.len();
     }
 
     /// Insert a character at the filter cursor.
     pub fn filter_insert_char(&mut self, c: char) {
-        self.clamp_filter_cursor();
-        self.filter_input.insert(self.filter_cursor, c);
-        self.filter_cursor += c.len_utf8();
+        input_insert_char(&mut self.filter_input, &mut self.filter_cursor, c);
+        self.note_filter_edited();
     }
 
     /// Delete the character before the filter cursor.
     pub fn filter_backspace(&mut self) {
-        self.clamp_filter_cursor();
-        if self.filter_cursor == 0 {
-            return;
-        }
-        let mut prev = 0;
-        for (i, _) in self.filter_input.char_indices() {
-            if i >= self.filter_cursor {
-                break;
-            }
-            prev = i;
-        }
-        self.filter_input.drain(prev..self.filter_cursor);
-        self.filter_cursor = prev;
+        input_backspace(&mut self.filter_input, &mut self.filter_cursor);
+        self.note_filter_edited();
     }
 
     /// Delete the character at the filter cursor.
     pub fn filter_delete(&mut self) {
-        self.clamp_filter_cursor();
-        if self.filter_cursor == self.filter_input.len() {
-            return;
-        }
-        let next = self.filter_input[self.filter_cursor..]
-            .chars()
-            .next()
-            .map(|c| self.filter_cursor + c.len_utf8())
-            .unwrap_or(self.filter_input.len());
-        self.filter_input.drain(self.filter_cursor..next);
+        input_delete(&mut self.filter_input, &mut self.filter_cursor);
+        self.note_filter_edited();
+    }
+
+    /// Delete the whitespace + word immediately before the filter cursor (Ctrl+W).
+    pub fn filter_delete_word_before(&mut self) {
+        input_delete_word_before(&mut self.filter_input, &mut self.filter_cursor);
+        self.note_filter_edited();
     }
 
     /// Clear the filter input and reset the cursor.
     pub fn filter_clear(&mut self) {
         self.filter_input.clear();
         self.filter_cursor = 0;
+        self.note_filter_edited();
+    }
+
+    /// Any manual edit exits history navigation so Down can later restore
+    /// the pre-navigation draft exactly once.
+    fn note_filter_edited(&mut self) {
+        self.history_index = None;
+    }
+
+    /// Record an applied non-empty filter for Up/Down history (dedupes the
+    /// most recent entry only, mirroring shell behaviour).
+    pub fn record_filter_history(&mut self) {
+        let input = self.filter_input.trim();
+        if input.is_empty() {
+            self.history_index = None;
+            return;
+        }
+        let input = input.to_string();
+        if self.filter_history.last() != Some(&input) {
+            self.filter_history.push(input);
+            if self.filter_history.len() > MAX_FILTER_HISTORY {
+                let excess = self.filter_history.len() - MAX_FILTER_HISTORY;
+                self.filter_history.drain(0..excess);
+            }
+        }
+        self.history_index = None;
+    }
+
+    /// Move to the previous applied filter expression (Up arrow).
+    pub fn filter_history_up(&mut self) {
+        if self.filter_history.is_empty() {
+            return;
+        }
+        let next = match self.history_index {
+            None => {
+                self.history_draft = self.filter_input.clone();
+                self.filter_history.len() - 1
+            }
+            Some(0) => return,
+            Some(i) => i - 1,
+        };
+        self.restore_history_entry(next);
+    }
+
+    /// Move to the next expression, restoring the draft after the newest one.
+    pub fn filter_history_down(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 < self.filter_history.len() {
+            self.restore_history_entry(index + 1);
+        } else {
+            self.filter_input = std::mem::take(&mut self.history_draft);
+            self.filter_cursor = self.filter_input.len();
+            self.history_index = None;
+        }
+    }
+
+    fn restore_history_entry(&mut self, index: usize) {
+        self.filter_input = self.filter_history[index].clone();
+        self.filter_cursor = self.filter_input.len();
+        self.history_index = Some(index);
+    }
+
+    /// Open search mode with the current query pre-filled.
+    pub fn begin_search(&mut self) {
+        self.search_input = self.search_query.clone().unwrap_or_default();
+        self.search_cursor = self.search_input.len();
+        self.show_help = false;
+        self.status_message = None;
+        self.status_is_error = false;
+        // Closing the help overlay changes the viewport height; re-home the
+        // bottom bar before the search query is applied.
+        self.needs_replay = true;
+        self.focus = Focus::SearchInput;
+    }
+
+    /// Apply the search query and return to the log view.
+    ///
+    /// An empty query clears highlighting. The query is escaped and wrapped in
+    /// `(?i)`, so it is always a valid case-insensitive literal regex.
+    pub fn apply_search(&mut self) {
+        let query = self.search_input.trim();
+        if query.is_empty() {
+            self.search_query = None;
+            self.search_regex = None;
+        } else {
+            let pattern = format!("(?i){}", regex::escape(query));
+            let compiled = Regex::new(&pattern).expect("regex::escape output must always compile");
+            self.search_query = Some(query.to_string());
+            self.search_regex = Some(compiled);
+        }
+        self.needs_replay = true;
+    }
+
+    pub fn search_move_left(&mut self) {
+        input_move_left(&self.search_input, &mut self.search_cursor);
+    }
+
+    pub fn search_move_right(&mut self) {
+        input_move_right(&self.search_input, &mut self.search_cursor);
+    }
+
+    pub fn search_move_start(&mut self) {
+        self.search_cursor = 0;
+    }
+
+    pub fn search_move_end(&mut self) {
+        self.search_cursor = self.search_input.len();
+    }
+
+    pub fn search_insert_char(&mut self, c: char) {
+        input_insert_char(&mut self.search_input, &mut self.search_cursor, c);
+    }
+
+    pub fn search_backspace(&mut self) {
+        input_backspace(&mut self.search_input, &mut self.search_cursor);
+    }
+
+    pub fn search_delete(&mut self) {
+        input_delete(&mut self.search_input, &mut self.search_cursor);
+    }
+
+    pub fn search_delete_word_before(&mut self) {
+        input_delete_word_before(&mut self.search_input, &mut self.search_cursor);
+    }
+
+    pub fn search_clear(&mut self) {
+        self.search_input.clear();
+        self.search_cursor = 0;
+    }
+
+    /// Open the save-filter-as prompt for the current filter input.
+    pub fn begin_filter_save(&mut self) {
+        self.name_target = self.filter_input.clone();
+        self.name_input.clear();
+        self.name_cursor = 0;
+        self.status_message = None;
+        self.status_is_error = false;
+        self.focus = Focus::FilterName;
+    }
+
+    /// Validate and persist the filter currently targeted by the name prompt.
+    ///
+    /// On success the status line reports the saved name; on failure the user
+    /// stays in the name prompt with the reason shown in the status line.
+    pub fn save_named_filter(&mut self) {
+        let name = self.name_input.trim().to_string();
+        let expr = self.name_target.trim().to_string();
+        if name.is_empty() || name.contains(['\t', '\n', '\r']) {
+            self.set_status(self.msgs.filter_name_invalid_name.to_string(), true);
+            return;
+        }
+        if expr.is_empty() {
+            self.set_status(self.msgs.filter_name_invalid_expr.to_string(), true);
+            return;
+        }
+        self.named_filters.insert(name.clone(), expr);
+        match crate::named_filters::save(&self.named_filters) {
+            Ok(()) => self.set_status(self.msgs.filter_name_saved(&name), false),
+            Err(e) => self.set_status(format!("{}: {}", self.msgs.config_save_error, e), true),
+        }
+    }
+
+    pub fn name_move_left(&mut self) {
+        input_move_left(&self.name_input, &mut self.name_cursor);
+    }
+
+    pub fn name_move_right(&mut self) {
+        input_move_right(&self.name_input, &mut self.name_cursor);
+    }
+
+    pub fn name_move_start(&mut self) {
+        self.name_cursor = 0;
+    }
+
+    pub fn name_move_end(&mut self) {
+        self.name_cursor = self.name_input.len();
+    }
+
+    pub fn name_insert_char(&mut self, c: char) {
+        input_insert_char(&mut self.name_input, &mut self.name_cursor, c);
+    }
+
+    pub fn name_backspace(&mut self) {
+        input_backspace(&mut self.name_input, &mut self.name_cursor);
+    }
+
+    pub fn name_delete(&mut self) {
+        input_delete(&mut self.name_input, &mut self.name_cursor);
+    }
+
+    pub fn name_delete_word_before(&mut self) {
+        input_delete_word_before(&mut self.name_input, &mut self.name_cursor);
+    }
+
+    pub fn name_clear(&mut self) {
+        self.name_input.clear();
+        self.name_cursor = 0;
+    }
+
+    /// One-key level filter (`v`/`d`/`i`/`w`/`e`).
+    ///
+    /// Appends `level:X` with an explicit AND, so pressing several keys
+    /// narrows to the strictest selected level. The exact token is deduped.
+    pub fn quick_level(&mut self, level: char) {
+        let token = format!("level:{}", level.to_ascii_uppercase());
+        if self
+            .filter_input
+            .split_whitespace()
+            .any(|part| part == token)
+        {
+            return;
+        }
+        let trimmed = self.filter_input.trim();
+        if trimmed.is_empty() {
+            self.filter_input = token;
+        } else {
+            self.filter_input = format!("{} & {}", trimmed, token);
+        }
+        self.filter_cursor = self.filter_input.len();
+        self.apply_filter();
+        self.record_filter_history();
+    }
+
+    /// Export the current filtered view to a timestamped file in the CWD.
+    pub fn export_filtered(&mut self) {
+        if self.buffer.filtered_len() == 0 {
+            self.set_status(self.msgs.export_empty.to_string(), false);
+            return;
+        }
+        let base = crate::export::default_export_path();
+        let path = crate::export::available_export_path(&base);
+        match crate::export::write_filtered(&self.buffer, &path) {
+            Ok(count) => self.set_status(
+                self.msgs.export_saved(count, &path.display().to_string()),
+                false,
+            ),
+            Err(e) => self.set_status(self.msgs.export_error(&e.to_string()), true),
+        }
+    }
+
+    fn set_status(&mut self, message: String, is_error: bool) {
+        self.status_message = Some(message);
+        self.status_is_error = is_error;
     }
 
     /// Toggle filter bypass (g key). Keeps filter_input intact.
@@ -373,7 +628,7 @@ impl App {
     /// Number of overlay rows to show above the filter bar (0 if none).
     pub fn overlay_rows(&self) -> u16 {
         if self.show_help {
-            10 // title + 8 keybindings + blank line
+            13 // title + 11 keybindings + blank line
         } else if self.show_settings {
             match self.settings_category {
                 SettingsCategory::Display => 10, // title + category + 6 toggles + hint + blank
@@ -388,6 +643,111 @@ impl App {
     pub fn viewport_height(&self) -> u16 {
         3 + self.overlay_rows()
     }
+}
+
+/// Floor a cursor to the nearest UTF-8 char boundary at or before it.
+fn clamp_input_cursor(input: &str, cursor: &mut usize) {
+    if *cursor > input.len() {
+        *cursor = input.len();
+    }
+    while *cursor > 0 && !input.is_char_boundary(*cursor) {
+        *cursor -= 1;
+    }
+}
+
+/// Byte offset of the char immediately before `cursor`.
+fn input_move_left(input: &str, cursor: &mut usize) {
+    clamp_input_cursor(input, cursor);
+    if *cursor == 0 {
+        return;
+    }
+    let mut prev = 0;
+    for (i, _) in input.char_indices() {
+        if i >= *cursor {
+            break;
+        }
+        prev = i;
+    }
+    *cursor = prev;
+}
+
+/// Move the cursor one UTF-8 character to the right.
+fn input_move_right(input: &str, cursor: &mut usize) {
+    clamp_input_cursor(input, cursor);
+    if *cursor == input.len() {
+        return;
+    }
+    if let Some(c) = input[*cursor..].chars().next() {
+        *cursor += c.len_utf8();
+    }
+}
+
+/// Insert a char at the cursor, keeping the cursor on a char boundary.
+fn input_insert_char(input: &mut String, cursor: &mut usize, c: char) {
+    clamp_input_cursor(input, cursor);
+    input.insert(*cursor, c);
+    *cursor += c.len_utf8();
+}
+
+/// Delete the char immediately before the cursor.
+fn input_backspace(input: &mut String, cursor: &mut usize) {
+    clamp_input_cursor(input, cursor);
+    if *cursor == 0 {
+        return;
+    }
+    let mut prev = 0;
+    for (i, _) in input.char_indices() {
+        if i >= *cursor {
+            break;
+        }
+        prev = i;
+    }
+    input.drain(prev..*cursor);
+    *cursor = prev;
+}
+
+/// Delete the char at the cursor.
+fn input_delete(input: &mut String, cursor: &mut usize) {
+    clamp_input_cursor(input, cursor);
+    if *cursor == input.len() {
+        return;
+    }
+    let next = input[*cursor..]
+        .chars()
+        .next()
+        .map(|c| *cursor + c.len_utf8())
+        .unwrap_or(input.len());
+    input.drain(*cursor..next);
+}
+
+/// Readline-style Ctrl+W: delete whitespace, then the word before the cursor.
+///
+/// Cursor lands at the start of the removed run. If the cursor is at 0 this is
+/// a no-op.
+fn input_delete_word_before(input: &mut String, cursor: &mut usize) {
+    clamp_input_cursor(input, cursor);
+    if *cursor == 0 {
+        return;
+    }
+    let mut start = *cursor;
+    let mut chars = input[..*cursor].char_indices().rev().peekable();
+    while let Some((idx, c)) = chars.peek().copied() {
+        if c.is_whitespace() {
+            start = idx;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    for (idx, c) in chars {
+        if c.is_whitespace() {
+            start = idx + c.len_utf8();
+            break;
+        }
+        start = idx;
+    }
+    input.drain(start..*cursor);
+    *cursor = start;
 }
 
 #[cfg(test)]
@@ -465,5 +825,138 @@ mod tests {
         app.filter_clear();
         assert_eq!(app.filter_input, "");
         assert_eq!(app.filter_cursor, 0);
+    }
+
+    #[test]
+    fn test_filter_delete_word_before_is_readline_style() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        for c in "tag:Foo bar".chars() {
+            app.filter_insert_char(c);
+        }
+        app.filter_delete_word_before();
+        assert_eq!(app.filter_input, "tag:Foo ");
+        assert_eq!(app.filter_cursor, "tag:Foo ".len());
+
+        // Deleting again removes the trailing whitespace + the previous
+        // whitespace-delimited token.
+        app.filter_delete_word_before();
+        assert_eq!(app.filter_input, "");
+        assert_eq!(app.filter_cursor, 0);
+    }
+
+    #[test]
+    fn test_filter_history_navigates_and_restores_draft() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.filter_input = "tag:A".to_string();
+        app.record_filter_history();
+        app.filter_input = "tag:B".to_string();
+        app.record_filter_history();
+        app.filter_input = "tag:C".to_string();
+        app.record_filter_history();
+        assert_eq!(app.filter_history, ["tag:A", "tag:B", "tag:C"]);
+
+        // Up enters history from the newest entry; the draft is preserved.
+        app.filter_history_up();
+        assert_eq!(app.filter_input, "tag:C");
+        app.filter_history_up();
+        assert_eq!(app.filter_input, "tag:B");
+        app.filter_history_up();
+        assert_eq!(app.filter_input, "tag:A");
+        // At the oldest entry another Up is a no-op.
+        app.filter_history_up();
+        assert_eq!(app.filter_input, "tag:A");
+
+        // Down walks forward, then restores the pre-navigation draft.
+        app.filter_history_down();
+        assert_eq!(app.filter_input, "tag:B");
+        app.filter_history_down();
+        assert_eq!(app.filter_input, "tag:C");
+        app.filter_history_down();
+        assert_eq!(app.filter_input, "tag:C");
+        assert_eq!(app.history_index, None);
+
+        // Manual editing aborts history navigation.
+        app.filter_history_up();
+        assert_eq!(app.history_index, Some(2));
+        app.filter_insert_char('X');
+        assert_eq!(app.history_index, None);
+    }
+
+    #[test]
+    fn test_filter_history_is_bounded() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        for i in 0..(MAX_FILTER_HISTORY + 5) {
+            app.filter_input = format!("tag:F{i}");
+            app.record_filter_history();
+        }
+        assert_eq!(app.filter_history.len(), MAX_FILTER_HISTORY);
+        assert_eq!(app.filter_history[0], "tag:F5");
+        assert_eq!(
+            app.filter_history.last().unwrap(),
+            &format!("tag:F{}", MAX_FILTER_HISTORY + 4)
+        );
+    }
+
+    #[test]
+    fn test_quick_level_appends_dedupes_and_applies() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.quick_level('e');
+        assert_eq!(app.filter_input, "level:E");
+        assert!(app.active_filter.is_some());
+        assert_eq!(app.filter_history, ["level:E"]);
+
+        // A second level is ANDed; a duplicate of the same level is ignored.
+        app.quick_level('w');
+        assert_eq!(app.filter_input, "level:E & level:W");
+        app.quick_level('e');
+        assert_eq!(app.filter_input, "level:E & level:W");
+
+        // Existing filters are preserved with explicit AND.
+        app.filter_input = "tag:Main".to_string();
+        app.quick_level('i');
+        assert_eq!(app.filter_input, "tag:Main & level:I");
+    }
+
+    #[test]
+    fn test_search_apply_is_case_insensitive_literal() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.search_input = "Main(Activity)".to_string();
+        app.apply_search();
+        let re = app.search_regex.as_ref().expect("search regex compiled");
+        assert!(re.is_match("prefix MAIN(ACTIVITY) suffix"));
+        assert!(!re.is_match("MainActivity"));
+        assert!(app.needs_replay);
+
+        // Empty query clears the search.
+        app.search_input.clear();
+        app.apply_search();
+        assert!(app.search_regex.is_none());
+        assert!(app.search_query.is_none());
+    }
+
+    #[test]
+    fn test_begin_search_prefills_current_query() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.show_help = true;
+        app.search_query = Some("oom".to_string());
+        app.begin_search();
+        assert_eq!(app.focus, Focus::SearchInput);
+        assert_eq!(app.search_input, "oom");
+        assert_eq!(app.search_cursor, 3);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_save_named_filter_rejects_empty_expression_without_io() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.begin_filter_save();
+        app.name_input = "errors".to_string();
+        app.save_named_filter();
+        assert!(app.status_is_error);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(app.msgs.filter_name_invalid_expr)
+        );
+        assert!(app.named_filters.is_empty());
     }
 }
