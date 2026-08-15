@@ -141,10 +141,14 @@ impl App {
                     entry.package = self.pid_package_map.get(&entry.pid).cloned();
                 }
                 if !self.paused {
-                    let eff_filter: Option<&Expr> = if self.filter_bypassed { None } else { self.active_filter.as_ref() };
+                    let eff_filter: Option<&Expr> = if self.filter_bypassed {
+                        None
+                    } else {
+                        self.active_filter.as_ref()
+                    };
                     self.buffer.push(entry.clone(), eff_filter);
                     // Only format and queue for scrollback if the entry passes the filter.
-                    if eff_filter.map_or(true, |f| f.evaluate(&entry)) {
+                    if eff_filter.is_none_or(|f| f.evaluate(&entry)) {
                         let line = crate::ui::format_entry(&entry, &self.config, &self.palette);
                         self.pending_log_lines.push(line);
                     }
@@ -197,7 +201,11 @@ impl App {
     /// Toggle filter bypass (g key). Keeps filter_input intact.
     pub fn toggle_filter_bypass(&mut self) {
         self.filter_bypassed = !self.filter_bypassed;
-        let f = if self.filter_bypassed { None } else { self.active_filter.as_ref() };
+        let f = if self.filter_bypassed {
+            None
+        } else {
+            self.active_filter.as_ref()
+        };
         self.buffer.rebuild_filtered(f);
         self.needs_replay = true;
     }
@@ -232,7 +240,7 @@ impl App {
         } else if self.show_settings {
             match self.settings_category {
                 SettingsCategory::Display => 10, // title + category + 6 toggles + hint + blank
-                SettingsCategory::Color => 13,   // title + category + preset + 8 items + hint + blank
+                SettingsCategory::Color => 13, // title + category + preset + 8 items + hint + blank
             }
         } else {
             0

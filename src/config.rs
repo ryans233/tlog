@@ -156,21 +156,15 @@ impl Preset {
     }
     /// Cycling wraps inside `ALL`; from Custom, '[' / ']' start at HighContrast/Default.
     pub fn next(self) -> Preset {
-        match self {
-            Preset::Default => Preset::Solarized,
-            Preset::Solarized => Preset::Monokai,
-            Preset::Monokai => Preset::HighContrast,
-            Preset::HighContrast => Preset::Default,
-            Preset::Custom => Preset::Default,
+        match Self::ALL.iter().position(|p| *p == self) {
+            Some(i) => Self::ALL[(i + 1) % Self::ALL.len()],
+            None => Preset::Default,
         }
     }
     pub fn prev(self) -> Preset {
-        match self {
-            Preset::Default => Preset::HighContrast,
-            Preset::Solarized => Preset::Default,
-            Preset::Monokai => Preset::Solarized,
-            Preset::HighContrast => Preset::Monokai,
-            Preset::Custom => Preset::HighContrast,
+        match Self::ALL.iter().position(|p| *p == self) {
+            Some(i) => Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()],
+            None => Preset::HighContrast,
         }
     }
     /// Overwrite the palette with this preset's colors. `Custom` is a no-op.
@@ -368,7 +362,11 @@ fn save_to(
 pub fn load() -> (ColorPalette, Preset, DisplayConfig) {
     match config_path() {
         Some(p) => load_from(&p),
-        None => (ColorPalette::default(), Preset::Default, DisplayConfig::default()),
+        None => (
+            ColorPalette::default(),
+            Preset::Default,
+            DisplayConfig::default(),
+        ),
     }
 }
 
@@ -400,14 +398,8 @@ mod tests {
     #[test]
     fn test_hex_roundtrip() {
         assert_eq!(color_to_hex(Color::Rgb(0xFF, 0x88, 0x00)), "#FF8800");
-        assert_eq!(
-            hex_to_color("#FF8800"),
-            Some(Color::Rgb(0xFF, 0x88, 0x00))
-        );
-        assert_eq!(
-            hex_to_color("ff8800"),
-            Some(Color::Rgb(0xFF, 0x88, 0x00))
-        );
+        assert_eq!(hex_to_color("#FF8800"), Some(Color::Rgb(0xFF, 0x88, 0x00)));
+        assert_eq!(hex_to_color("ff8800"), Some(Color::Rgb(0xFF, 0x88, 0x00)));
     }
 
     #[test]
@@ -433,9 +425,11 @@ mod tests {
         let mut palette = ColorPalette::default();
         Preset::Solarized.apply(&mut palette);
         let preset = Preset::Solarized;
-        let mut display = DisplayConfig::default();
-        display.show_pid = false;
-        display.colorize = false;
+        let display = DisplayConfig {
+            show_pid: false,
+            colorize: false,
+            ..Default::default()
+        };
         save_to(&path, &palette, &preset, &display).expect("save should succeed");
         let (loaded_p, loaded_s, loaded_d) = load_from(&path);
         assert_eq!(loaded_p, palette);

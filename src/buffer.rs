@@ -110,13 +110,11 @@ impl LogBuffer {
         self.filtered.len()
     }
 
-
     /// Get the entry at a given position in the filtered view.
     pub fn get_filtered(&self, pos: usize) -> Option<(usize, &LogEntry)> {
         let idx = *self.filtered.get(pos)?;
         self.entries.get(idx).map(|e| (idx, e))
     }
-
 }
 
 impl Default for LogBuffer {

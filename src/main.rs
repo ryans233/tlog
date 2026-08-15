@@ -2,9 +2,9 @@ mod app;
 mod buffer;
 mod config;
 mod filter;
+mod i18n;
 mod logcat;
 mod scrollback;
-mod i18n;
 mod ui;
 mod viewport;
 use clap::Parser;
@@ -98,7 +98,9 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
         use std::io::Write;
         let log_line = |msg: &str| {
             if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true).append(true).open("tlog-rejected.log")
+                .create(true)
+                .append(true)
+                .open("tlog-rejected.log")
             {
                 let _ = writeln!(f, "[tlog] {}", msg);
             }
@@ -109,13 +111,13 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
             buf.clear();
             match reader.read_until(b'\n', &mut buf).await {
                 Ok(0) => {
-                    let _ = log_line("logcat reader: EOF (adb process exited)");
+                    log_line("logcat reader: EOF (adb process exited)");
                     let _ = tx.send(Message::LogcatDied).await;
                     break;
                 }
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf);
-                    let line = line.trim_end_matches(|c| c == '\n' || c == '\r');
+                    let line = line.trim_end_matches(['\n', '\r']);
                     // Try parsing as a log entry
                     if let Some(entry) = parse_line(line) {
                         // Check for ActivityManager lifecycle events
@@ -148,10 +150,17 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
                     } else {
                         // Line didn't match expected format — append to rejected log.
                         if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true).append(true).open("tlog-rejected.log")
+                            .create(true)
+                            .append(true)
+                            .open("tlog-rejected.log")
                         {
                             if line.len() > 200 {
-                                let _ = writeln!(f, "[unparsed len={}] {}...", line.len(), &line[..200]);
+                                let _ = writeln!(
+                                    f,
+                                    "[unparsed len={}] {}...",
+                                    line.len(),
+                                    &line[..200]
+                                );
                             } else {
                                 let _ = writeln!(f, "{}", line);
                             }
@@ -159,7 +168,7 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
                     }
                 }
                 Err(e) => {
-                    let _ = log_line(&format!("logcat reader: read error: {}", e));
+                    log_line(&format!("logcat reader: read error: {}", e));
                     let _ = tx.send(Message::LogcatDied).await;
                     break;
                 }
@@ -210,7 +219,7 @@ async fn main() -> Result<()> {
     let target_row = term_rows.saturating_sub(VIEWPORT_HEIGHT + 1);
     let result = if cursor_row < target_row {
         for _ in cursor_row..target_row {
-            print!("\n");
+            println!();
         }
         // Re-probe cursor after pushing
         let (_, new_row) = crossterm::cursor::position()?;
@@ -513,7 +522,9 @@ fn close_settings(app: &mut App) {
 }
 
 fn commit_color_edit(app: &mut App) {
-    let Some(item) = app.color_editing else { return; };
+    let Some(item) = app.color_editing else {
+        return;
+    };
     match crate::config::hex_to_color(&app.color_input) {
         Some(c) => {
             item.set(&mut app.palette, c);
@@ -583,15 +594,9 @@ mod tests {
 
     /// Point XDG_CONFIG_HOME at a unique temp dir so saves land in an isolated
     /// file. Returns the dir plus the lock guard (held for the test's lifetime).
-    fn isolate_config(
-        tag: &str,
-    ) -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+    fn isolate_config(tag: &str) -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
         let guard = CONFIG_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!(
-            "tlog-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir = std::env::temp_dir().join(format!("tlog-test-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         // SAFETY: the lock guarantees no other test reads XDG_CONFIG_HOME while
         // this test owns it; each test uses its own unique dir.
@@ -707,10 +712,7 @@ mod tests {
             event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
         ));
         assert_eq!(app.color_editing, Some(crate::config::ColorItem::Verbose));
-        assert_eq!(
-            app.color_error.as_deref(),
-            Some(app.msgs.color_invalid_hex)
-        );
+        assert_eq!(app.color_error.as_deref(), Some(app.msgs.color_invalid_hex));
 
         // Esc cancels the edit without saving.
         assert!(handle_logview_key(
@@ -760,8 +762,14 @@ mod tests {
         let mut out = Vec::new();
         restore_terminal(&mut out, 24).expect("restore should succeed");
         let bytes = String::from_utf8(out).expect("ansi bytes");
-        assert!(bytes.starts_with("\x1b[0m"), "resets colors first: {bytes:?}");
-        assert!(bytes.contains("\x1b[24;1H"), "cursor parked on bottom row: {bytes:?}");
+        assert!(
+            bytes.starts_with("\x1b[0m"),
+            "resets colors first: {bytes:?}"
+        );
+        assert!(
+            bytes.contains("\x1b[24;1H"),
+            "cursor parked on bottom row: {bytes:?}"
+        );
         assert!(
             bytes.ends_with("\x1b[2J\x1b[3J"),
             "clears screen + scrollback: {bytes:?}"

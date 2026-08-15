@@ -40,7 +40,6 @@ impl<'a> ViewportFrame<'a> {
     }
 }
 
-
 // ── ViewportTerminal ─────────────────────────────────────────────────────────
 
 pub struct ViewportTerminal<B: Backend + io::Write> {
@@ -64,10 +63,7 @@ where
     <B as Backend>::Error: Into<io::Error>,
 {
     /// Create a new ViewportTerminal at a specific cursor position.
-    pub fn with_options_and_cursor_position(
-        backend: B,
-        cursor_pos: Position,
-    ) -> io::Result<Self> {
+    pub fn with_options_and_cursor_position(backend: B, cursor_pos: Position) -> io::Result<Self> {
         let screen_size = backend.size().map_err(Into::into)?;
         let viewport_area = Rect::new(0, cursor_pos.y, 0, 0);
         let buffer = Buffer::empty(viewport_area);
@@ -121,10 +117,7 @@ where
     }
 
     /// Apply the buffer diff to the backend.
-    fn apply_buffer_with_cursor(
-        &mut self,
-        cursor_position: Option<Position>,
-    ) -> io::Result<()> {
+    fn apply_buffer_with_cursor(&mut self, cursor_position: Option<Position>) -> io::Result<()> {
         self.flush_diff()?;
 
         match cursor_position {
@@ -135,10 +128,8 @@ where
                 }
             }
             Some(pos) => {
-                let abs_pos = Position::new(
-                    self.viewport_area.x + pos.x,
-                    self.viewport_area.y + pos.y,
-                );
+                let abs_pos =
+                    Position::new(self.viewport_area.x + pos.x, self.viewport_area.y + pos.y);
                 if self.hidden_cursor {
                     crossterm::execute!(self.backend, crossterm::cursor::Show)?;
                     self.hidden_cursor = false;
@@ -180,10 +171,7 @@ where
                 last_pos = Some(Position::new(x, y));
 
                 // Move cursor
-                crossterm::execute!(
-                    self.backend,
-                    crossterm::cursor::MoveTo(abs_col, abs_row)
-                )?;
+                crossterm::execute!(self.backend, crossterm::cursor::MoveTo(abs_col, abs_row))?;
 
                 // Emit style + color changes via raw ANSI.
                 write_cell_style(&mut self.backend, curr)?;
@@ -219,7 +207,6 @@ where
         self.buffers[1 - self.current].reset();
     }
 
-
     pub fn clear_scrollback_and_visible_screen_ansi(&mut self) -> io::Result<()> {
         crossterm::execute!(
             self.backend,
@@ -241,7 +228,6 @@ where
             .min(self.viewport_area.top());
     }
 
-
     pub fn backend_mut(&mut self) -> &mut B {
         &mut self.backend
     }
@@ -249,8 +235,6 @@ where
     pub fn size(&self) -> io::Result<Size> {
         self.backend.size().map_err(Into::into)
     }
-
-
 
     fn current_buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffers[self.current]

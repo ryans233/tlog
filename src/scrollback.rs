@@ -54,10 +54,7 @@ impl Command for ResetScrollRegion {
 /// Write styled log lines above the viewport into the terminal's scrollback.
 ///
 /// After this call, the viewport may have moved if there was room below it.
-pub fn insert_log_lines<B>(
-    terminal: &mut ViewportTerminal<B>,
-    lines: &[Line<'_>],
-) -> io::Result<()>
+pub fn insert_log_lines<B>(terminal: &mut ViewportTerminal<B>, lines: &[Line<'_>]) -> io::Result<()>
 where
     B: ratatui::backend::Backend + io::Write,
     <B as ratatui::backend::Backend>::Error: Into<io::Error>,
@@ -84,17 +81,11 @@ where
 
         // Set scroll region to everything above the viewport.
         // This ensures \n at the boundary scrolls only the log area, not the viewport.
-        crossterm::execute!(
-            backend,
-            SetScrollRegion(0..viewport_top),
-        )?;
+        crossterm::execute!(backend, SetScrollRegion(0..viewport_top),)?;
 
         // Move cursor just above the viewport (last row of scroll region).
         let write_row = viewport_top.saturating_sub(1);
-        crossterm::execute!(
-            backend,
-            crossterm::cursor::MoveTo(0, write_row),
-        )?;
+        crossterm::execute!(backend, crossterm::cursor::MoveTo(0, write_row),)?;
 
         for line in lines {
             // \r\n at the bottom of the scroll region scrolls the region up by 1,
@@ -142,11 +133,7 @@ pub fn write_spans<W: io::Write>(w: &mut W, spans: &[Span<'_>]) -> io::Result<()
     Ok(())
 }
 
-fn emit_style_change<W: io::Write>(
-    w: &mut W,
-    from: Style,
-    to: Style,
-) -> io::Result<()> {
+fn emit_style_change<W: io::Write>(w: &mut W, from: Style, to: Style) -> io::Result<()> {
     if from == to {
         return Ok(());
     }

@@ -8,7 +8,7 @@ use ratatui::{
 use chrono::{Datelike, Timelike};
 
 use crate::app::{App, DisplayConfig, Focus, SettingsCategory};
-use crate::config::{color_to_hex, ColorItem, ColorPalette};
+use crate::config::{ColorItem, ColorPalette, color_to_hex};
 use crate::logcat::{LogEntry, LogLevel};
 use crate::viewport::ViewportFrame;
 
@@ -78,8 +78,12 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
 
     // Cursor position for filter input (viewport-relative coordinates).
     if is_focused {
-        let rel_cx = (inner.x - area.x) + prompt.len() as u16
-            + app.filter_input.len().min(inner.width.saturating_sub(1) as usize) as u16;
+        let rel_cx = (inner.x - area.x)
+            + prompt.len() as u16
+            + app
+                .filter_input
+                .len()
+                .min(inner.width.saturating_sub(1) as usize) as u16;
         let rel_cy = inner.y - area.y;
         f.set_cursor_position((rel_cx, rel_cy));
     }
@@ -94,10 +98,7 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
             width: filter_area.width.saturating_sub(2),
             height: 1,
         };
-        let error_text = Span::styled(
-            msgs.filter_error(err),
-            Style::default().fg(Color::Red),
-        );
+        let error_text = Span::styled(msgs.filter_error(err), Style::default().fg(Color::Red));
         f.render_widget(Paragraph::new(Line::from(error_text)), error_area);
     }
 }
@@ -132,7 +133,11 @@ fn run_state_indicator(
 // ── Entry formatting ─────────────────────────────────────────────────────────
 
 /// Format a single log entry into a ratatui `Line`.
-pub fn format_entry(entry: &LogEntry, config: &DisplayConfig, palette: &ColorPalette) -> Line<'static> {
+pub fn format_entry(
+    entry: &LogEntry,
+    config: &DisplayConfig,
+    palette: &ColorPalette,
+) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
 
     let level_style = level_style(entry.level, palette);
@@ -182,10 +187,7 @@ pub fn format_entry(entry: &LogEntry, config: &DisplayConfig, palette: &ColorPal
         } else {
             format!("{}: ", entry.tag)
         };
-        spans.push(Span::styled(
-            tag_str,
-            Style::default().fg(palette.tag),
-        ));
+        spans.push(Span::styled(tag_str, Style::default().fg(palette.tag)));
     }
 
     let msg_style = if config.colorize {
@@ -194,10 +196,7 @@ pub fn format_entry(entry: &LogEntry, config: &DisplayConfig, palette: &ColorPal
         Style::default()
     };
 
-    spans.push(Span::styled(
-        entry.message.clone(),
-        msg_style,
-    ));
+    spans.push(Span::styled(entry.message.clone(), msg_style));
 
     Line::from(spans)
 }
@@ -210,7 +209,6 @@ fn level_style(level: LogLevel, palette: &ColorPalette) -> Style {
         Style::default().fg(fg)
     }
 }
-
 
 // ── Help / Settings overlay ─────────────────────────────────────────────────
 
@@ -290,7 +288,11 @@ fn settings_category_row(app: &App) -> Line<'static> {
         if i > 0 {
             spans.push(Span::styled("  |  ", inactive));
         }
-        let style = if *cat == app.settings_category { active } else { inactive };
+        let style = if *cat == app.settings_category {
+            active
+        } else {
+            inactive
+        };
         spans.push(Span::styled(cat.label(msgs), style));
     }
     spans.push(Span::styled("   [Tab]  ", key_style));
@@ -302,8 +304,12 @@ fn settings_display_rows(app: &App) -> Vec<Line<'static>> {
     let key_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    fn status_label<'a>(enabled: bool, msgs: &'a crate::i18n::Messages) -> &'a str {
-        if enabled { msgs.on_label } else { msgs.off_label }
+    fn status_label(enabled: bool, msgs: &crate::i18n::Messages) -> &str {
+        if enabled {
+            msgs.on_label
+        } else {
+            msgs.off_label
+        }
     }
     fn style_for(enabled: bool) -> Style {
         if enabled {
@@ -393,7 +399,13 @@ fn settings_color_rows(app: &App) -> Vec<Line<'static>> {
     for (i, item) in ColorItem::ALL.iter().enumerate() {
         let n = i + 1;
         if app.color_editing == Some(*item) {
-            let text = format!("  [{}] {}  #{}{}", n, item.label(msgs), app.color_input, "█");
+            let text = format!(
+                "  [{}] {}  #{}{}",
+                n,
+                item.label(msgs),
+                app.color_input,
+                "█"
+            );
             rows.push(Line::from(Span::styled(text, key_style)));
         } else {
             let color = item.color(&app.palette);
@@ -481,8 +493,10 @@ mod tests {
     #[test]
     fn test_format_entry_colorize_off() {
         let entry = make_entry(LogLevel::Info, "MyTag", "hello");
-        let mut config = DisplayConfig::default();
-        config.colorize = false;
+        let config = DisplayConfig {
+            colorize: false,
+            ..Default::default()
+        };
         let line = format_entry(&entry, &config, &ColorPalette::default());
         assert_eq!(line.spans[5].style.fg, None);
     }
