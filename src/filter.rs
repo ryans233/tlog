@@ -2,9 +2,14 @@ use chrono::{DateTime, Duration, Local, TimeZone};
 use pest::Parser;
 use pest_derive::Parser;
 use regex::Regex;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::logcat::LogEntry;
+
+/// Maximum nesting depth for named filters that reference other named filters.
+/// Keeps malicious or accidental `name:a -> name:b -> name:a` cycles bounded.
+const MAX_NAMED_FILTER_DEPTH: usize = 8;
 
 #[derive(Parser)]
 #[grammar = "filter.pest"]
@@ -103,8 +108,33 @@ enum FilterToken {
 
 /// Compile a filter query string into an `Expr`.
 ///
-/// Returns `Err(String)` with a human-readable error if parsing or compilation fails.
+/// This is the no-named-filters entry point used by tests and callers without
+/// saved filters. Returns `Err(String)` with a human-readable error if parsing
+/// or compilation fails.
+#[allow(dead_code)] // exercised by unit tests; App uses `compile_with_named`
 pub fn compile(input: &str, msgs: &crate::i18n::Messages) -> Result<Expr, String> {
+    compile_with_named(input, msgs, &BTreeMap::new())
+}
+
+/// Compile a filter query, resolving `name:<saved>` predicates against `named`.
+///
+/// Saved-filter references are inlined recursively with a depth limit so
+/// accidental or malicious reference cycles terminate with an error instead of
+/// overflowing the stack.
+pub fn compile_with_named(
+    input: &str,
+    msgs: &crate::i18n::Messages,
+    named: &BTreeMap<String, String>,
+) -> Result<Expr, String> {
+    compile_inner(input, msgs, named, &mut Vec::new())
+}
+
+fn compile_inner(
+    input: &str,
+    msgs: &crate::i18n::Messages,
+    named: &BTreeMap<String, String>,
+    stack: &mut Vec<String>,
+) -> Result<Expr, String> {
     // Empty filter matches everything
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -133,7 +163,7 @@ pub fn compile(input: &str, msgs: &crate::i18n::Messages) -> Result<Expr, String
     let tokens = apply_implicit_and(tokens);
 
     // Stage 3: build AST from token stream with precedence (& binds tighter than |).
-    build_ast(&tokens, 0, msgs).map(|(expr, _)| expr)
+    build_ast(&tokens, 0, msgs, named, stack).map(|(expr, _)| expr)
 }
 
 /// Recursively collect tokens from pest pairs.
@@ -377,14 +407,16 @@ fn build_ast(
     tokens: &[FilterToken],
     pos: usize,
     msgs: &crate::i18n::Messages,
+    named: &BTreeMap<String, String>,
+    stack: &mut Vec<String>,
 ) -> Result<(Expr, usize), String> {
-    let (mut left, mut pos) = build_and(tokens, pos, msgs)?;
+    let (mut left, mut pos) = build_and(tokens, pos, msgs, named, stack)?;
 
     while pos < tokens.len() {
         match &tokens[pos] {
             FilterToken::Or => {
                 pos += 1;
-                let (right, new_pos) = build_and(tokens, pos, msgs)?;
+                let (right, new_pos) = build_and(tokens, pos, msgs, named, stack)?;
                 left = Expr::Or(Box::new(left), Box::new(right));
                 pos = new_pos;
             }
@@ -402,14 +434,16 @@ fn build_and(
     tokens: &[FilterToken],
     pos: usize,
     msgs: &crate::i18n::Messages,
+    named: &BTreeMap<String, String>,
+    stack: &mut Vec<String>,
 ) -> Result<(Expr, usize), String> {
-    let (mut left, mut pos) = build_primary(tokens, pos, msgs)?;
+    let (mut left, mut pos) = build_primary(tokens, pos, msgs, named, stack)?;
 
     while pos < tokens.len() {
         match &tokens[pos] {
             FilterToken::And => {
                 pos += 1;
-                let (right, new_pos) = build_primary(tokens, pos, msgs)?;
+                let (right, new_pos) = build_primary(tokens, pos, msgs, named, stack)?;
                 left = Expr::And(Box::new(left), Box::new(right));
                 pos = new_pos;
             }
@@ -425,6 +459,8 @@ fn build_primary(
     tokens: &[FilterToken],
     pos: usize,
     msgs: &crate::i18n::Messages,
+    named: &BTreeMap<String, String>,
+    stack: &mut Vec<String>,
 ) -> Result<(Expr, usize), String> {
     if pos >= tokens.len() {
         return Err(msgs.unexpected_token.to_string());
@@ -437,15 +473,15 @@ fn build_primary(
             negate,
             regex,
         } => {
-            let expr = make_predicate(key, value, *negate, *regex, msgs)?;
+            let expr = make_predicate(key, value, *negate, *regex, msgs, named, stack)?;
             Ok((expr, pos + 1))
         }
         FilterToken::Not => {
-            let (inner, new_pos) = build_primary(tokens, pos + 1, msgs)?;
+            let (inner, new_pos) = build_primary(tokens, pos + 1, msgs, named, stack)?;
             Ok((Expr::Not(Box::new(inner)), new_pos))
         }
         FilterToken::OpenParen => {
-            let (expr, pos) = build_ast(tokens, pos + 1, msgs)?;
+            let (expr, pos) = build_ast(tokens, pos + 1, msgs, named, stack)?;
             if pos < tokens.len() && matches!(&tokens[pos], FilterToken::CloseParen) {
                 Ok((expr, pos + 1))
             } else {
@@ -461,6 +497,8 @@ fn make_predicate(
     negate: bool,
     regex: bool,
     msgs: &crate::i18n::Messages,
+    named: &BTreeMap<String, String>,
+    stack: &mut Vec<String>,
 ) -> Result<Expr, String> {
     match key {
         Key::Age => {
@@ -484,6 +522,28 @@ fn make_predicate(
                 negate,
                 regex: None,
             }))
+        }
+        Key::Name if !value.is_empty() => {
+            // `name:<saved>` inlines the stored expression. Empty names remain
+            // the historical always-true no-op so a malformed empty predicate
+            // still compiles instead of breaking the filter pipeline.
+            let Some(saved) = named.get(value) else {
+                return Err(msgs.unknown_named_filter(value));
+            };
+            if stack.len() >= MAX_NAMED_FILTER_DEPTH || stack.iter().any(|name| name == value) {
+                return Err(msgs.recursive_named_filter(value));
+            }
+            stack.push(value.to_string());
+            let compiled = compile_inner(saved, msgs, named, stack);
+            stack.pop();
+            let expr = compiled?;
+            // A `~` modifier has no meaningful behavior for saved filters; it
+            // is ignored like the other fixed-semantics keys.
+            Ok(if negate {
+                Expr::Not(Box::new(expr))
+            } else {
+                expr
+            })
         }
         _ => {
             let compiled = compile_regex(regex, value, msgs)?;
@@ -851,10 +911,48 @@ mod tests {
     }
 
     #[test]
-    fn test_name_noop() {
-        let expr = compile("name:MySavedFilter", &crate::i18n::EN).unwrap();
+    fn test_name_requires_saved_filter() {
+        assert!(compile("name:MySavedFilter", &crate::i18n::EN).is_err());
+        // An empty name is the historical always-true no-op.
+        let expr = compile("name:\"\"", &crate::i18n::EN).unwrap();
         let entry = make_entry("AnyTag", "any msg", LogLevel::Info);
-        assert!(expr.evaluate(&entry), "name: should be a no-op");
+        assert!(expr.evaluate(&entry));
+    }
+
+    #[test]
+    fn test_named_filter_resolution() {
+        let named = BTreeMap::from([(
+            "errors".to_string(),
+            "tag:MainActivity level:ERROR".to_string(),
+        )]);
+        let expr = compile_with_named("name:errors", &crate::i18n::EN, &named).unwrap();
+        assert!(expr.evaluate(&make_entry("MainActivity", "boom", LogLevel::Error)));
+        assert!(!expr.evaluate(&make_entry("MainActivity", "msg", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("Other", "boom", LogLevel::Error)));
+    }
+
+    #[test]
+    fn test_named_filter_chains_and_negation() {
+        let named = BTreeMap::from([
+            ("errors".to_string(), "level:ERROR".to_string()),
+            (
+                "main-errors".to_string(),
+                "tag:MainActivity name:errors".to_string(),
+            ),
+        ]);
+        let expr = compile_with_named("-name:\"main-errors\"", &crate::i18n::EN, &named).unwrap();
+        assert!(!expr.evaluate(&make_entry("MainActivity", "boom", LogLevel::Error)));
+        assert!(expr.evaluate(&make_entry("MainActivity", "msg", LogLevel::Info)));
+        assert!(expr.evaluate(&make_entry("Other", "boom", LogLevel::Error)));
+    }
+
+    #[test]
+    fn test_named_filter_cycles_are_rejected() {
+        let named = BTreeMap::from([
+            ("a".to_string(), "name:b".to_string()),
+            ("b".to_string(), "name:a".to_string()),
+        ]);
+        assert!(compile_with_named("name:a", &crate::i18n::EN, &named).is_err());
     }
 
     #[test]
