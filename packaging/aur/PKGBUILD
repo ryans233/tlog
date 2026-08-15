@@ -1,0 +1,14 @@
+# Maintainer: replace with your AUR maintainer info
+pkgname=tlog-bin
+pkgver=1.4.0
+pkgrel=1
+pkgdesc="Android Logcat TUI viewer with inline terminal scrollback"
+arch=('x86_64')
+url="https://github.com/ryans233/tlog"
+license=('MIT')
+source=("tlog-x86_64-unknown-linux-gnu.tar.gz::https://github.com/ryans233/tlog/releases/download/v${pkgver}/tlog-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('REPLACE_WITH_LINUX_X86_64_SHA256')
+
+package() {
+    install -Dm755 "${srcdir}/tlog" "${pkgdir}/usr/bin/tlog"
+}
