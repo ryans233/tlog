@@ -15,6 +15,10 @@ A terminal-based Android logcat viewer written in Rust.
 - **Display options** — set which fields show (timestamp, PID, TID, tag, level, color) in Settings (`o`)
 - **Pause/resume** — freeze log output for careful inspection
 - **Filter bypass** — temporarily disable the active filter with `g`, keeping the input intact
+- **Search & highlight** — `/` opens a search box; matching tag/package/message text is highlighted in the current filter view
+- **Quick level filters** — `v` / `d` / `i` / `w` / `e` add `level:` filters instantly
+- **Filter editor upgrades** — readline-style `Ctrl+A/E/W`, applied-filter history (`↑`/`↓`), and saved named filters (`Ctrl+S`, then use `name:<name>`)
+- **Export & offline playback** — `E` writes the current filtered view to a timestamped file; `tlog --file <log>` replays a log file with the same UI pipeline
 - **Multi-language** — UI strings in English and Chinese, auto-detected from `LANG` or set via `--lang`
 - **Multi-device** — select a device with `-s` / `--serial` or `ANDROID_SERIAL`, and choose log buffers with `-b` / `--buffer`
 - **Resilient feed** — `--clear` flushes the device log first, `--exit-on-eof` quits when logcat stops, and `--reconnect` restarts it with exponential backoff
@@ -58,6 +62,10 @@ tlog --reconnect
 # Write rejected lines and reader diagnostics to the config directory
 tlog --debug
 
+# Offline playback of a saved/exported log file (exits at EOF, no adb needed)
+tlog --file crash.log
+tlog --file crash.log --filter 'level:ERROR'
+
 # Force language
 tlog --lang en
 tlog --lang zh
@@ -73,16 +81,24 @@ tlog --lang zh
 | `g` | Toggle filter bypass (keeps input, press again to restore) |
 | `o` | Open settings (display options + colors) |
 | `h` | Show keybindings help |
+| `/` | Search and highlight matches in the current filter view |
+| `E` | Export the current filtered view to `tlog-export-<timestamp>.log` |
+| `v` / `d` / `i` / `w` / `e` | Add `level:V` / `level:D` / `level:I` / `level:W` / `level:E` to the filter |
 | `Tab` | Switch focus to filter input |
-| `Esc` | Return to log view (when editing filter) |
-| `Enter` | Apply filter (when editing filter) |
+| `Esc` | Return to log view (when editing filter / search) |
+| `Enter` | Apply filter or search (when editing) |
 | `←` / `→` | Move the filter cursor by character (when editing filter) |
-| `Home` / `↑` | Jump to the start of the filter input |
-| `End` / `↓` | Jump to the end of the filter input |
+| `Home` / `Ctrl+A` | Jump to the start of the filter input |
+| `End` / `Ctrl+E` | Jump to the end of the filter input |
+| `↑` / `↓` | Previous / next applied filter (history; restores the draft after the newest entry) |
 | `Backspace` / `Delete` | Delete before / at the cursor (when editing filter) |
+| `Ctrl+W` | Delete the word before the cursor (when editing filter) |
 | `Ctrl+U` | Clear the filter input (when editing filter) |
+| `Ctrl+S` | Save the current filter under a name; use it later with `name:<name>` |
 
 > While paused, incoming log lines are not buffered and are discarded.
+> Search is a case-insensitive literal match against the displayed tag/package
+> and message text; press `/` again and submit an empty query to clear it.
 
 ### Settings screen (`o`)
 
@@ -120,7 +136,23 @@ is:crash                 # FATAL EXCEPTION
 is:stacktrace            # Stack trace continuation lines
 package:com.example      # Package name filter (requires resolved PID)
 package:mine             # Always true (no project context)
+name:errors              # Saved filter (created with Ctrl+S; quote names with `-`)
 ```
+
+### Search, export, and offline playback
+
+- `/` enters search mode. `Enter` applies a **case-insensitive literal** search;
+  all matching entries in the current filtered view are highlighted (tag,
+  package, and message text). New entries are highlighted as they arrive.
+  Submitting an empty query clears the highlight.
+- `E` writes every entry in the current filtered view (up to the 100k ring
+  buffer) to `tlog-export-<timestamp>.log` in the working directory, in the
+  canonical `-v threadtime` format.
+- `tlog --file <log>` replays an existing log file through the same parser and
+  UI. It does not require `adb` and exits automatically at EOF, which is handy
+  for CI demos and recordings.
+- Terminal resize bursts are debounced for 75 ms before the scrollback is
+  cleared and replayed.
 
 ## Architecture
 
@@ -134,6 +166,8 @@ package:mine             # Always true (no project context)
 ├─ buffer.rs ─ Ring buffer (100k hard cap) ─────┤
 ├─ app.rs ──── Global state + message dispatch ─┤
 ├─ config.rs ── Colors + display persistence ───┤
+├─ named_filters.rs ─ Saved filter persistence ─┤
+├─ export.rs ── Filtered-view export ───────────┤
 ├─ ui.rs ───── ratatui rendering ───────────────┤
 ├─ i18n.rs ─── Multi-language messages ─────────┤
 ├─ scrollback.rs ─ Scrollback buffer ───────────┤
@@ -185,6 +219,9 @@ The file location depends on the platform:
 
 Unknown or malformed lines are ignored per-key; missing keys fall back to
 defaults.
+
+Saved filters live next to `config.conf` in `filters.conf`, one
+tab-separated `name<TAB>expression` line per filter.
 
 ## Changelog
 
