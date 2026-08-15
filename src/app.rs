@@ -68,6 +68,8 @@ impl SettingsCategory {
 pub struct App {
     pub buffer: LogBuffer,
     pub filter_input: String,
+    /// Cursor byte offset inside `filter_input`; always kept on a UTF-8 char boundary.
+    pub filter_cursor: usize,
     pub active_filter: Option<Expr>,
     pub filter_error: Option<String>,
     pub running: bool,
@@ -105,9 +107,19 @@ pub struct App {
 impl App {
     pub fn new(lang: crate::i18n::Lang) -> Self {
         let (palette, color_preset, config) = crate::config::load();
+        Self::new_with(lang, palette, color_preset, config)
+    }
+
+    fn new_with(
+        lang: crate::i18n::Lang,
+        palette: crate::config::ColorPalette,
+        color_preset: crate::config::Preset,
+        config: DisplayConfig,
+    ) -> Self {
         Self {
             buffer: LogBuffer::new(),
             filter_input: String::new(),
+            filter_cursor: 0,
             active_filter: None,
             filter_error: None,
             running: false,
@@ -129,6 +141,18 @@ impl App {
             settings_category: SettingsCategory::Display,
             msgs: crate::i18n::messages(lang),
         }
+    }
+
+    /// Test constructor that skips the process-global config path, keeping
+    /// tests independent of `XDG_CONFIG_HOME`.
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(lang: crate::i18n::Lang) -> Self {
+        Self::new_with(
+            lang,
+            crate::config::ColorPalette::default(),
+            crate::config::Preset::Default,
+            DisplayConfig::default(),
+        )
     }
 
     /// Dispatch a message from the logcat reader or timer.
@@ -198,6 +222,97 @@ impl App {
         self.needs_replay = true;
     }
 
+    /// Clamp the filter cursor onto the nearest valid UTF-8 char boundary.
+    fn clamp_filter_cursor(&mut self) {
+        if self.filter_cursor > self.filter_input.len() {
+            self.filter_cursor = self.filter_input.len();
+        }
+        while self.filter_cursor > 0 && !self.filter_input.is_char_boundary(self.filter_cursor) {
+            self.filter_cursor -= 1;
+        }
+    }
+
+    /// Move the filter cursor one character to the left.
+    pub fn filter_move_left(&mut self) {
+        self.clamp_filter_cursor();
+        if self.filter_cursor == 0 {
+            return;
+        }
+        let mut prev = 0;
+        for (i, _) in self.filter_input.char_indices() {
+            if i >= self.filter_cursor {
+                break;
+            }
+            prev = i;
+        }
+        self.filter_cursor = prev;
+    }
+
+    /// Move the filter cursor one character to the right.
+    pub fn filter_move_right(&mut self) {
+        self.clamp_filter_cursor();
+        if self.filter_cursor == self.filter_input.len() {
+            return;
+        }
+        if let Some(c) = self.filter_input[self.filter_cursor..].chars().next() {
+            self.filter_cursor += c.len_utf8();
+        }
+    }
+
+    /// Move the filter cursor to the start (also used by the Up arrow).
+    pub fn filter_move_start(&mut self) {
+        self.filter_cursor = 0;
+    }
+
+    /// Move the filter cursor to the end (also used by the Down arrow).
+    pub fn filter_move_end(&mut self) {
+        self.filter_cursor = self.filter_input.len();
+    }
+
+    /// Insert a character at the filter cursor.
+    pub fn filter_insert_char(&mut self, c: char) {
+        self.clamp_filter_cursor();
+        self.filter_input.insert(self.filter_cursor, c);
+        self.filter_cursor += c.len_utf8();
+    }
+
+    /// Delete the character before the filter cursor.
+    pub fn filter_backspace(&mut self) {
+        self.clamp_filter_cursor();
+        if self.filter_cursor == 0 {
+            return;
+        }
+        let mut prev = 0;
+        for (i, _) in self.filter_input.char_indices() {
+            if i >= self.filter_cursor {
+                break;
+            }
+            prev = i;
+        }
+        self.filter_input.drain(prev..self.filter_cursor);
+        self.filter_cursor = prev;
+    }
+
+    /// Delete the character at the filter cursor.
+    pub fn filter_delete(&mut self) {
+        self.clamp_filter_cursor();
+        if self.filter_cursor == self.filter_input.len() {
+            return;
+        }
+        let next = self.filter_input[self.filter_cursor..]
+            .chars()
+            .next()
+            .map(|c| self.filter_cursor + c.len_utf8())
+            .unwrap_or(self.filter_input.len());
+        self.filter_input.drain(self.filter_cursor..next);
+    }
+
+    /// Clear the filter input and reset the cursor.
+    pub fn filter_clear(&mut self) {
+        self.filter_input.clear();
+        self.filter_cursor = 0;
+    }
+
     /// Toggle filter bypass (g key). Keeps filter_input intact.
     pub fn toggle_filter_bypass(&mut self) {
         self.filter_bypassed = !self.filter_bypassed;
@@ -250,5 +365,83 @@ impl App {
     /// Total viewport height including filter bar and overlay.
     pub fn viewport_height(&self) -> u16 {
         3 + self.overlay_rows()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_cursor_moves_and_inserts() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.filter_insert_char('a');
+        app.filter_insert_char('b');
+        app.filter_insert_char('c');
+        assert_eq!(app.filter_input, "abc");
+        assert_eq!(app.filter_cursor, 3);
+
+        app.filter_move_left();
+        assert_eq!(app.filter_cursor, 2);
+        app.filter_insert_char('X');
+        assert_eq!(app.filter_input, "abXc");
+        assert_eq!(app.filter_cursor, 3);
+
+        app.filter_move_start();
+        app.filter_move_right();
+        assert_eq!(app.filter_cursor, 1);
+        app.filter_move_end();
+        assert_eq!(app.filter_cursor, 4);
+    }
+
+    #[test]
+    fn test_filter_backspace_and_delete_respect_cursor() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.filter_insert_char('a');
+        app.filter_insert_char('b');
+        app.filter_insert_char('c');
+
+        app.filter_move_left();
+        app.filter_backspace();
+        assert_eq!(app.filter_input, "ac");
+        assert_eq!(app.filter_cursor, 1);
+
+        app.filter_move_start();
+        app.filter_delete();
+        assert_eq!(app.filter_input, "c");
+        assert_eq!(app.filter_cursor, 0);
+    }
+
+    #[test]
+    fn test_filter_cursor_handles_utf8() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        for c in "héllo".chars() {
+            app.filter_insert_char(c);
+        }
+        assert_eq!(app.filter_input, "héllo");
+        assert_eq!(app.filter_cursor, "héllo".len());
+
+        app.filter_move_left();
+        assert_eq!(app.filter_cursor, 5); // before the final 'o'
+        app.filter_move_right();
+        assert_eq!(app.filter_cursor, 6);
+        app.filter_backspace();
+        assert_eq!(app.filter_input, "héll");
+        assert_eq!(app.filter_cursor, 5);
+
+        app.filter_move_start();
+        app.filter_move_right();
+        assert_eq!(app.filter_cursor, 1); // after 'h', before the 2-byte 'é'
+        app.filter_delete();
+        assert_eq!(app.filter_input, "hll");
+    }
+
+    #[test]
+    fn test_filter_clear_resets_cursor() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.filter_insert_char('a');
+        app.filter_clear();
+        assert_eq!(app.filter_input, "");
+        assert_eq!(app.filter_cursor, 0);
     }
 }

@@ -277,6 +277,7 @@ async fn run_app(
     // Apply startup filter if provided
     if let Some(ref f) = cli.filter {
         app.filter_input = f.clone();
+        app.filter_move_end();
         app.apply_filter();
         // Replay all entries into scrollback (none yet, but init the viewport).
         replay_filtered(terminal, &app)?;
@@ -429,6 +430,7 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         }
         KeyCode::Tab => {
             app.focus = Focus::FilterInput;
+            app.filter_move_end();
         }
         // Settings overlay: display config + colors (o)
         KeyCode::Char('o') => {
@@ -554,7 +556,7 @@ fn apply_preset(app: &mut App, preset: crate::config::Preset) {
 fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
     // Ctrl+U must be checked before Char(c) to avoid unreachable pattern
     if key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.filter_input.clear();
+        app.filter_clear();
         return true;
     }
 
@@ -571,14 +573,18 @@ fn handle_filter_key(app: &mut App, key: event::KeyEvent) -> bool {
             app.focus = Focus::LogView;
         }
         KeyCode::Char(c) => {
-            app.filter_input.push(c);
+            app.filter_insert_char(c);
         }
         KeyCode::Backspace => {
-            app.filter_input.pop();
+            app.filter_backspace();
         }
-        KeyCode::Delete if !app.filter_input.is_empty() => {
-            app.filter_input.remove(0);
+        KeyCode::Delete => {
+            app.filter_delete();
         }
+        KeyCode::Left => app.filter_move_left(),
+        KeyCode::Right => app.filter_move_right(),
+        KeyCode::Up | KeyCode::Home => app.filter_move_start(),
+        KeyCode::Down | KeyCode::End => app.filter_move_end(),
         _ => {}
     }
     true
@@ -606,6 +612,43 @@ mod tests {
 
     fn char_key(c: char) -> event::KeyEvent {
         event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn code_key(code: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_filter_arrow_keys_move_cursor() {
+        let mut app = App::new_for_tests(i18n::Lang::En);
+        app.focus = Focus::FilterInput;
+        app.filter_input = "ab".to_string();
+        app.filter_cursor = 0;
+
+        // Right moves one character at a time; Up/Down jump to start/end.
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Right)));
+        assert_eq!(app.filter_cursor, 1);
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Down)));
+        assert_eq!(app.filter_cursor, 2);
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Left)));
+        assert_eq!(app.filter_cursor, 1);
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Up)));
+        assert_eq!(app.filter_cursor, 0);
+
+        // Home/End map to the same start/end movement.
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::End)));
+        assert_eq!(app.filter_cursor, 2);
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Home)));
+        assert_eq!(app.filter_cursor, 0);
+
+        // Insertion and deletion happen at the cursor, not always at the ends.
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Right)));
+        assert!(handle_filter_key(&mut app, char_key('X')));
+        assert_eq!(app.filter_input, "aXb");
+        assert_eq!(app.filter_cursor, 2);
+        assert!(handle_filter_key(&mut app, code_key(KeyCode::Backspace)));
+        assert_eq!(app.filter_input, "ab");
+        assert_eq!(app.filter_cursor, 1);
     }
 
     #[test]

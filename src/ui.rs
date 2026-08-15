@@ -6,11 +6,99 @@ use ratatui::{
 };
 
 use chrono::{Datelike, Timelike};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, DisplayConfig, Focus, SettingsCategory};
 use crate::config::{ColorItem, ColorPalette, color_to_hex};
 use crate::logcat::{LogEntry, LogLevel};
 use crate::viewport::ViewportFrame;
+
+/// Floor a byte offset to the nearest UTF-8 char boundary at or before it.
+fn floor_char_boundary(s: &str, mut pos: usize) -> usize {
+    pos = pos.min(s.len());
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+/// Truncate a string to at most `max_cols` terminal columns.
+fn truncate_columns(s: &str, max_cols: usize) -> &str {
+    if max_cols == 0 {
+        return "";
+    }
+    let mut cols = 0;
+    for (idx, c) in s.char_indices() {
+        let width = UnicodeWidthChar::width(c).unwrap_or(0);
+        if cols + width > max_cols {
+            return &s[..idx];
+        }
+        cols += width;
+    }
+    s
+}
+
+/// Round a desired scroll column down to a char-boundary column.
+fn align_scroll_col(s: &str, desired: usize) -> usize {
+    if desired == 0 {
+        return 0;
+    }
+    let mut col = 0;
+    for c in s.chars() {
+        let width = UnicodeWidthChar::width(c).unwrap_or(0);
+        if col + width > desired {
+            return col;
+        }
+        col += width;
+        if col >= desired {
+            return col;
+        }
+    }
+    col
+}
+
+/// Convert a char-boundary column to the byte offset at that boundary.
+fn byte_at_col(s: &str, col: usize) -> usize {
+    if col == 0 {
+        return 0;
+    }
+    let mut cur = 0;
+    for (idx, c) in s.char_indices() {
+        cur += UnicodeWidthChar::width(c).unwrap_or(0);
+        if cur > col {
+            break;
+        }
+        if cur == col {
+            return idx + c.len_utf8();
+        }
+    }
+    s.len()
+}
+
+/// Return the visible slice of the filter input plus the cursor's column
+/// within that slice, keeping the cursor inside the available width.
+fn visible_filter_slice(input: &str, cursor: usize, max_cols: usize) -> (&str, usize) {
+    let cursor = floor_char_boundary(input, cursor);
+    if max_cols == 0 {
+        return ("", 0);
+    }
+
+    let cursor_col = UnicodeWidthStr::width(&input[..cursor]);
+    let total_cols = UnicodeWidthStr::width(input);
+    if total_cols <= max_cols {
+        return (truncate_columns(input, max_cols), cursor_col);
+    }
+
+    let desired_scroll = if cursor_col >= max_cols {
+        cursor_col + 1 - max_cols
+    } else {
+        0
+    };
+    let scroll_col = align_scroll_col(input, desired_scroll);
+    let scroll_byte = byte_at_col(input, scroll_col);
+    let visible = truncate_columns(&input[scroll_byte..], max_cols);
+    (visible, cursor_col.saturating_sub(scroll_col))
+}
 
 // ── Main render ──────────────────────────────────────────────────────────────
 
@@ -69,21 +157,24 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
     let inner = block.inner(filter_area);
     f.render_widget(block, filter_area);
 
-    // Render filter input text
+    // Render filter input text. The visible slice is horizontally scrolled
+    // around the cursor so arrow-key navigation stays visible on narrow
+    // terminals.
     let prompt = if is_focused { "> " } else { "  " };
-    let display_text = format!("{}{}", prompt, app.filter_input);
+    let prompt_width = UnicodeWidthStr::width(prompt);
+    let max_filter_cols = inner.width.saturating_sub(prompt_width as u16) as usize;
+    let (visible_filter, cursor_col) =
+        visible_filter_slice(&app.filter_input, app.filter_cursor, max_filter_cols);
+    let display_text = format!("{}{}", prompt, visible_filter);
 
     let text = Paragraph::new(display_text).style(Style::default());
     f.render_widget(text, inner);
 
     // Cursor position for filter input (viewport-relative coordinates).
     if is_focused {
-        let rel_cx = (inner.x - area.x)
-            + prompt.len() as u16
-            + app
-                .filter_input
-                .len()
-                .min(inner.width.saturating_sub(1) as usize) as u16;
+        let max_local_x = inner.width.saturating_sub(1) as usize;
+        let local_x = (prompt_width + cursor_col).min(max_local_x);
+        let rel_cx = (inner.x - area.x) + local_x as u16;
         let rel_cy = inner.y - area.y;
         f.set_cursor_position((rel_cx, rel_cy));
     }
@@ -539,5 +630,42 @@ mod tests {
         let lines = settings_lines(&app);
         assert_eq!(lines.len(), 13);
         assert!(line_text(&lines[1]).contains(app.msgs.settings_category_color));
+    }
+
+    #[test]
+    fn test_visible_filter_slice_shows_full_short_input() {
+        let (visible, cursor_col) = visible_filter_slice("abc", 3, 10);
+        assert_eq!(visible, "abc");
+        assert_eq!(cursor_col, 3);
+    }
+
+    #[test]
+    fn test_visible_filter_slice_scrolls_to_keep_cursor_visible() {
+        let input = "abcdefghij";
+        // Cursor after "f" (column 6) with only 4 columns available: the
+        // window should scroll so the cursor stays inside the visible area.
+        let (visible, cursor_col) = visible_filter_slice(input, 6, 4);
+        assert_eq!(cursor_col, 3);
+        assert_eq!(visible, "defg");
+        assert_eq!(cursor_col, UnicodeWidthStr::width(visible) - 1);
+    }
+
+    #[test]
+    fn test_visible_filter_slice_handles_wide_chars() {
+        let input = "中文abc";
+        let cursor = input.len();
+        let (visible, cursor_col) = visible_filter_slice(input, cursor, 4);
+        // The window starts at column 4 (after the two wide chars), leaving
+        // the three ASCII chars visible and the cursor on the last column.
+        assert_eq!(visible, "abc");
+        assert_eq!(UnicodeWidthStr::width(visible), 3);
+        assert_eq!(cursor_col, 3);
+    }
+
+    #[test]
+    fn test_visible_filter_slice_handles_zero_width() {
+        let (visible, cursor_col) = visible_filter_slice("abc", 1, 0);
+        assert_eq!(visible, "");
+        assert_eq!(cursor_col, 0);
     }
 }
