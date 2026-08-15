@@ -3,6 +3,10 @@ name = "tlog"
 version = "1.3.0"
 edition = "2024"
 
+[[bench]]
+name = "replay"
+harness = false
+
 [dependencies]
 ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
