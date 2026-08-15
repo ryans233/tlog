@@ -71,8 +71,8 @@ where
         for (i, line) in lines.iter().enumerate() {
             crossterm::execute!(backend, crossterm::cursor::MoveTo(0, i as u16))?;
             write_spans(backend, &line.spans)?;
-            io::Write::flush(backend)?;
         }
+        io::Write::flush(backend)?;
         return Ok(());
     }
 
@@ -92,9 +92,11 @@ where
             // leaving the cursor at the same row (now blank).
             write!(backend, "\r\n")?;
             write_spans(backend, &line.spans)?;
-            // Flush after each line so the terminal processes the scroll.
-            io::Write::flush(backend)?;
         }
+
+        // Flush once after the whole batch; each line does not need its own
+        // syscall-boundary flush.
+        io::Write::flush(backend)?;
 
         crossterm::execute!(backend, ResetScrollRegion)?;
     }
