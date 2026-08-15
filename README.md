@@ -6,6 +6,9 @@ A terminal-based Android logcat viewer written in Rust.
 
 <img width="906" height="593" alt="image" src="https://github.com/user-attachments/assets/8777e329-fecb-4a17-94ce-fd2c06c57a68" />
 
+![tlog demo](assets/demo.gif)
+*Illustrative demo rendered in tlog's display format (colors and bottom filter bar match the real TUI).*
+
 ## Features
 
 - **Real-time log stream** — reads and parses `adb logcat -v threadtime` output
@@ -23,13 +26,27 @@ A terminal-based Android logcat viewer written in Rust.
 - **Multi-device** — select a device with `-s` / `--serial` or `ANDROID_SERIAL`, and choose log buffers with `-b` / `--buffer`
 - **Resilient feed** — `--clear` flushes the device log first, `--exit-on-eof` quits when logcat stops, and `--reconnect` restarts it with exponential backoff
 - **Opt-in diagnostics** — unparsed lines go to `tlog-rejected.log` in the config directory only when `--debug` (or `TLOG_DEBUG`) is set, with automatic rotation
+- **Segmented replay** — filter changes repaint the 10k-line replay in small chunks, so key handling and incoming logs stay responsive on a full buffer
 - **Ring buffer** — 100,000 entries hard cap, memory-safe
 
 ## Installation
 
+From source:
+
 ```bash
 cargo install --path .
 ```
+
+Prebuilt binaries are attached to every GitHub Release. On the release tag the
+artifacts also use `tlog-<target>.tar.gz` / `.zip` names, so
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) can install
+them directly:
+
+```bash
+cargo binstall tlog
+```
+
+See `packaging/` for Homebrew, Scoop, and AUR package templates.
 
 Or run directly:
 
@@ -69,6 +86,52 @@ tlog --file crash.log --filter 'level:ERROR'
 # Force language
 tlog --lang en
 tlog --lang zh
+```
+
+### CLI reference
+
+```text
+$ tlog --help
+Android Logcat TUI viewer with inline terminal scrollback
+
+Usage: tlog [OPTIONS]
+
+Options:
+      --cmd <CMD>
+          Override the logcat command (comma-separated args)
+
+  -s, --serial <SERIAL>
+          Target a device by serial number (passed as `adb -s <serial>`)
+
+  -b, --buffer <BUFFER>
+          Log buffer(s) to pass to `adb logcat -b` (repeatable or comma-separated)
+
+  -c, --clear
+          Clear the device log before streaming (`adb logcat -c`)
+
+      --exit-on-eof
+          Exit when the logcat feed ends instead of leaving the UI open
+
+      --reconnect
+          Reconnect with exponential backoff when the logcat feed ends
+
+      --debug
+          Write rejected lines and reader diagnostics to the config-dir rejected log
+
+      --file <FILE>
+          Play back a log file instead of streaming from `adb logcat`
+
+      --filter <FILTER>
+          Pre-populate and apply a filter on startup
+
+      --lang <LANG>
+          UI language (en / zh). Auto-detected from LANG if not set
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
 ```
 
 ### Keybindings
@@ -184,6 +247,20 @@ name:errors              # Saved filter (created with Ctrl+S; quote names with `
 | Zero-copy view | `filtered: Vec<usize>` stores indices, formatting is done on-the-fly |
 | Periodic shrink | `shrink_to_fit()` after eviction |
 
+## Performance & benchmarks
+
+Replays are segmented into 128-line chunks and yielded to the event loop, so a
+full 10k-line repaint never blocks keys or incoming logs. Regression scenarios
+for the hot paths live in `benches/replay.rs`:
+
+```bash
+cargo bench --bench replay          # normal run
+cargo bench --bench replay -- --quick  # one iteration (used by CI)
+```
+
+The benchmark fixture covers 100k-entry pushes, eviction, filter rebuilds, and
+10k-entry replay formatting (plain and search-highlighted).
+
 ## Tech stack
 
 | Purpose | Crate |
@@ -222,6 +299,15 @@ defaults.
 
 Saved filters live next to `config.conf` in `filters.conf`, one
 tab-separated `name<TAB>expression` line per filter.
+
+## Release & packaging
+
+- CI quality gates run on every push/PR; tag releases run the same gates
+  before the release build starts.
+- Release assets include the raw binary, a SHA256 checksum file, and standard
+  `tlog-<target>.tar.gz` / `.zip` archives for `cargo-binstall`.
+- Ready-to-publish Homebrew, Scoop, and AUR templates live under `packaging/`
+  with per-platform checksum placeholders.
 
 ## Changelog
 

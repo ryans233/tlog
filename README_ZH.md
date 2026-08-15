@@ -6,6 +6,9 @@
 
 <img width="906" height="593" alt="image" src="https://github.com/user-attachments/assets/8777e329-fecb-4a17-94ce-fd2c06c57a68" />
 
+![tlog demo](assets/demo.gif)
+*示意性演示动画（按 tlog 的实际显示格式渲染：配色与底部过滤器栏与真实 TUI 一致）。*
+
 ## 功能
 
 - **实时日志流** — 通过 `adb logcat -v threadtime` 读取并解析日志
@@ -23,13 +26,26 @@
 - **多设备** — 使用 `-s` / `--serial` 或 `ANDROID_SERIAL` 选择设备，使用 `-b` / `--buffer` 选择日志缓冲区
 - **可靠的日志流** — `--clear` 先清空设备日志，`--exit-on-eof` 在 logcat 停止时退出，`--reconnect` 指数退避自动重连
 - **可选诊断日志** — 仅当设置 `--debug`（或 `TLOG_DEBUG`）时，未解析行才会写入配置目录的 `tlog-rejected.log`，并自动轮转
+- **分段回放** — 过滤变更后把 1 万条回放拆成小块逐步重绘，缓冲区满时按键与新日志依然流畅
 - **环形缓冲区** — 10 万条硬上限，内存安全
 
 ## 安装
 
+从源码安装：
+
 ```bash
 cargo install --path .
 ```
+
+每个 GitHub Release 都附带预编译产物。Release tag 上的产物同时使用
+`tlog-<target>.tar.gz` / `.zip` 标准命名，因此
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) 可以直接安装：
+
+```bash
+cargo binstall tlog
+```
+
+Homebrew、Scoop 与 AUR 的打包模板见 `packaging/` 目录。
 
 或直接运行：
 
@@ -69,6 +85,52 @@ tlog --file crash.log --filter 'level:ERROR'
 # 指定语言
 tlog --lang zh
 tlog --lang en
+```
+
+### CLI 参考
+
+```text
+$ tlog --help
+Android Logcat TUI viewer with inline terminal scrollback
+
+Usage: tlog [OPTIONS]
+
+Options:
+      --cmd <CMD>
+          Override the logcat command (comma-separated args)
+
+  -s, --serial <SERIAL>
+          Target a device by serial number (passed as `adb -s <serial>`)
+
+  -b, --buffer <BUFFER>
+          Log buffer(s) to pass to `adb logcat -b` (repeatable or comma-separated)
+
+  -c, --clear
+          Clear the device log before streaming (`adb logcat -c`)
+
+      --exit-on-eof
+          Exit when the logcat feed ends instead of leaving the UI open
+
+      --reconnect
+          Reconnect with exponential backoff when the logcat feed ends
+
+      --debug
+          Write rejected lines and reader diagnostics to the config-dir rejected log
+
+      --file <FILE>
+          Play back a log file instead of streaming from `adb logcat`
+
+      --filter <FILTER>
+          Pre-populate and apply a filter on startup
+
+      --lang <LANG>
+          UI language (en / zh). Auto-detected from LANG if not set
+
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
 ```
 
 ### 快捷键
@@ -180,6 +242,18 @@ name:errors              # 命名过滤器（Ctrl+S 创建；名称含 - 时请�
 | 零拷贝视图 | `filtered: Vec<usize>` 存索引，渲染时临时格式化 |
 | 定期收缩 | 淘汰后 `shrink_to_fit()` |
 
+## 性能与基准
+
+回放被拆成每轮 128 行的分段，并在事件循环间让出执行权：即使缓冲区已满，
+1 万行重绘也不会阻塞按键和新日志。热路径回归场景位于 `benches/replay.rs`：
+
+```bash
+cargo bench --bench replay             # 常规运行
+cargo bench --bench replay -- --quick  # 单次迭代（CI 冒烟）
+```
+
+基准覆盖 10 万条 push、驱逐、过滤重建与 1 万条回放格式化（普通与搜索高亮）。
+
 ## 技术栈
 
 | 用途 | Crate |
@@ -216,6 +290,14 @@ name:errors              # 命名过滤器（Ctrl+S 创建；名称含 - 时请�
 
 命名过滤器保存在 `config.conf` 旁边的 `filters.conf`，每行一个
 `名称<TAB>表达式`。
+
+## 发布与打包
+
+- CI 质量门禁在每次 push/PR 上运行；tag 发布会先通过同一套门禁再开始构建。
+- Release 产物包含原始二进制、SHA256 校验文件，以及 `cargo-binstall`
+  可直接使用的 `tlog-<target>.tar.gz` / `.zip` 标准归档。
+- `packaging/` 提供可直接发布的 Homebrew、Scoop 与 AUR 模板（含分平台
+  校验和占位符）。
 
 ## Changelog
 
