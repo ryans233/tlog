@@ -816,9 +816,13 @@ fn handle_logview_key(app: &mut App, key: event::KeyEvent) -> bool {
         KeyCode::Char('/') => {
             app.begin_search();
         }
-        // Export the current filtered view (uppercase E; lowercase e is
-        // the quick ERROR level key).
+        // Export the current filtered view. Accept both `Char('E')` (most
+        // terminals) and `Char('e') + SHIFT` (keyboard protocols that keep
+        // the unshifted codepoint in the modifiers).
         KeyCode::Char('E') => {
+            app.export_filtered();
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::SHIFT) => {
             app.export_filtered();
         }
         // Android Studio-style quick level filters.
@@ -1432,6 +1436,21 @@ mod tests {
             app.status_message.is_some(),
             "empty export reports a notice"
         );
+        assert_eq!(app.status_message.as_deref(), Some(app.msgs.export_empty));
+
+        // Some keyboard protocols keep the unshifted codepoint and put SHIFT
+        // in the modifiers; that spelling must export too.
+        app.status_message = None;
+        let shift_e = event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::SHIFT);
+        assert!(handle_logview_key(&mut app, shift_e));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(app.msgs.export_empty),
+            "shift-e must export, not add a quick level"
+        );
+
+        let shift_upper_e = event::KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert!(handle_logview_key(&mut app, shift_upper_e));
         assert_eq!(app.status_message.as_deref(), Some(app.msgs.export_empty));
     }
 
