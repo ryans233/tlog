@@ -1,8 +1,6 @@
 #[cfg(test)]
 use chrono::TimeZone;
-#[cfg(test)]
-use chrono::Timelike;
-use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -59,6 +57,32 @@ pub struct LogEntry {
     pub package: Option<String>,
 }
 
+impl LogEntry {
+    /// Render the entry in canonical `-v threadtime` format.
+    ///
+    /// Exports use this so the output round-trips through [`parse_line`] and
+    /// can be replayed with `tlog --file <exported-file>`.
+    pub fn threadtime_string(&self) -> String {
+        let ts = self.timestamp;
+        let millis = (ts.and_utc().timestamp_millis() % 1000).rem_euclid(1000) as u32;
+        format!(
+            "{:02}-{:02} {:02}:{:02}:{:02}.{:03} {:>5} {:>5} {} {}: {}",
+            ts.month(),
+            ts.day(),
+            ts.hour(),
+            ts.minute(),
+            ts.second(),
+            millis,
+            self.pid,
+            self.tid,
+            self.level.as_char(),
+            self.tag,
+            self.message,
+        )
+    }
+}
+
+#[derive(Debug)]
 pub enum Message {
     /// A newly parsed log entry.
     NewEntry(LogEntry),
@@ -460,6 +484,20 @@ mod tests {
         let line = "07-27 10:15:30.123     0     0 V Tag: ";
         let entry = parse_line(line).expect("should parse");
         assert_eq!(entry.message, "");
+    }
+
+    #[test]
+    fn test_threadtime_string_roundtrips_through_parser() {
+        let line = "07-27 10:15:30.123  1234  5678 E MyTag: boom";
+        let entry = parse_line(line).expect("should parse");
+        let rendered = entry.threadtime_string();
+        let reparsed = parse_line(&rendered).expect("rendered line should parse");
+        assert_eq!(reparsed.pid, entry.pid);
+        assert_eq!(reparsed.tid, entry.tid);
+        assert_eq!(reparsed.level, entry.level);
+        assert_eq!(reparsed.tag, entry.tag);
+        assert_eq!(reparsed.message, entry.message);
+        assert_eq!(reparsed.timestamp, entry.timestamp);
     }
 
     #[test]
