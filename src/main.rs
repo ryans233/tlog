@@ -450,6 +450,33 @@ fn reconnect_delay(attempt: u32) -> Duration {
 }
 const VIEWPORT_HEIGHT: u16 = 3;
 const MAX_REPLAY: usize = 10_000;
+/// Lines replayed per event-loop iteration. Keeping chunks small lets keys,
+/// resize, and new log lines stay responsive while history is repainted.
+const REPLAY_CHUNK: usize = 128;
+
+/// Progress of a segmented scrollback replay.
+///
+/// A full replay is split into chunks so a filter change on a full 100k-entry
+/// buffer never blocks the event loop for the whole 10k-line repaint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReplayState {
+    next: usize,
+    end: usize,
+}
+
+/// Replay range for the current filtered view (latest `MAX_REPLAY` entries).
+fn replay_state_for(filtered_len: usize) -> Option<ReplayState> {
+    let start = filtered_len.saturating_sub(MAX_REPLAY);
+    (start < filtered_len).then_some(ReplayState {
+        next: start,
+        end: filtered_len,
+    })
+}
+
+/// End bound (exclusive) of the chunk starting at `next`.
+fn next_replay_chunk_end(next: usize, end: usize) -> usize {
+    next.saturating_add(REPLAY_CHUNK).min(end)
+}
 
 /// Restore the terminal after tlog exits: reset styles, clear the visible
 /// screen and the scrollback the session filled, and park the cursor on the
@@ -586,13 +613,12 @@ async fn run_app(
     };
     let mut seed_done = false;
 
-    // Apply startup filter if provided
+    // Apply startup filter if provided. `apply_filter` raises `needs_replay`,
+    // which the event loop handles on its first iteration.
     if let Some(ref filter) = cli.filter {
         app.filter_input = filter.clone();
         app.filter_move_end();
         app.apply_filter();
-        // Replay all entries into scrollback (none yet, but init the viewport).
-        replay_filtered(terminal, &app)?;
     }
 
     let feed = if let Some(path) = &cli.file {
@@ -610,8 +636,9 @@ async fn run_app(
     // Resize events are coalesced for `RESIZE_DEBOUNCE` before clearing and
     // replaying scrollback, so window-drag resize storms don't replay 10k
     // lines per event.
-    let mut resize_pending: Option<(u16, u16)> = None;
     let mut resize_deadline: Option<time::Instant> = None;
+    // Segmented replay of the latest `MAX_REPLAY` filtered entries.
+    let mut replay_state: Option<ReplayState> = None;
 
     let result: Result<()> = loop {
         let resize_timer = resize_deadline.map(time::sleep_until);
@@ -629,20 +656,17 @@ async fn run_app(
                         // expensive clear + replay until the resize burst stops.
                         let vh = app.viewport_height();
                         terminal.set_viewport_area(Rect::new(0, rows.saturating_sub(vh), cols, vh));
-                        resize_pending = Some((cols, rows));
                         resize_deadline = Some(time::Instant::now() + RESIZE_DEBOUNCE);
                     }
                     _ => {}
                 }
             }
             _ = resize_wait(resize_timer), if resize_deadline.is_some() => {
+                // The debounce has elapsed. The viewport area was re-homed in
+                // the Resize event branch; the actual clear+replay now follows
+                // the normal segmented `needs_replay` path below.
                 resize_deadline = None;
-                if let Some((cols, rows)) = resize_pending.take() {
-                    terminal.clear_scrollback_and_visible_screen_ansi()?;
-                    let vh = app.viewport_height();
-                    terminal.set_viewport_area(Rect::new(0, rows.saturating_sub(vh), cols, vh));
-                    replay_filtered(terminal, &app)?;
-                }
+                app.needs_replay = true;
             }
             seed = &mut seed_task, if !seed_done => {
                 seed_done = true;
@@ -679,7 +703,8 @@ async fn run_app(
                 app.dispatch(Message::Tick);
             }
         }
-        // Handle filter/search change: clear scrollback and replay.
+        // Handle filter/search/settings change: clear scrollback and start a
+        // segmented replay.
         if app.needs_replay {
             // Replay covers every entry already in the buffer; pending lines
             // would otherwise be inserted after the replay and duplicate them.
@@ -694,12 +719,37 @@ async fn run_app(
                 size.width,
                 vh,
             ));
-            replay_filtered(terminal, &app)?;
+            replay_state = replay_state_for(app.buffer.filtered_len());
             app.needs_replay = false;
         }
 
-        // Flush pending log lines into scrollback.
-        if !app.pending_log_lines.is_empty() {
+        // Repaint one chunk per iteration so keys/resize/new entries stay
+        // responsive during a large replay.
+        if let Some(state) = &mut replay_state {
+            let chunk_end = next_replay_chunk_end(state.next, state.end);
+            let mut batch = Vec::with_capacity(chunk_end - state.next);
+            for pos in state.next..chunk_end {
+                if let Some((_, entry)) = app.buffer.get_filtered(pos) {
+                    batch.push(ui::format_entry(
+                        entry,
+                        &app.config,
+                        &app.palette,
+                        app.search_regex.as_ref(),
+                    ));
+                }
+            }
+            if !batch.is_empty() {
+                insert_log_lines(terminal, &batch)?;
+            }
+            state.next = chunk_end;
+            if state.next >= state.end {
+                replay_state = None;
+            }
+        }
+
+        // New entries are queued while replay is in flight and flushed after
+        // the final replay chunk so scrollback order stays chronological.
+        if replay_state.is_none() && !app.pending_log_lines.is_empty() {
             insert_log_lines(terminal, &app.pending_log_lines)?;
             app.pending_log_lines.clear();
         }
@@ -724,41 +774,6 @@ async fn resize_wait(timer: Option<time::Sleep>) {
         Some(timer) => timer.await,
         None => futures::future::pending::<()>().await,
     }
-}
-
-/// Replay all filtered entries into scrollback (for filter changes / resize).
-fn replay_filtered(
-    terminal: &mut ViewportTerminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-    app: &App,
-) -> std::io::Result<()> {
-    let total = app.buffer.filtered_len();
-    if total == 0 {
-        return Ok(());
-    }
-
-    // Only replay the most recent MAX_REPLAY entries.
-    let start = total.saturating_sub(MAX_REPLAY);
-    let mut batch: Vec<ratatui::text::Line<'static>> = Vec::with_capacity(256);
-
-    for pos in start..total {
-        if let Some((_, entry)) = app.buffer.get_filtered(pos) {
-            batch.push(ui::format_entry(
-                entry,
-                &app.config,
-                &app.palette,
-                app.search_regex.as_ref(),
-            ));
-        }
-        if batch.len() >= 256 {
-            insert_log_lines(terminal, &batch)?;
-            batch.clear();
-        }
-    }
-    if !batch.is_empty() {
-        insert_log_lines(terminal, &batch)?;
-    }
-
-    Ok(())
 }
 
 fn handle_key(app: &mut App, key: event::KeyEvent) -> bool {
@@ -1223,6 +1238,26 @@ mod tests {
         let task = tokio::spawn(run_file_feed(path, rejected, tx));
         assert!(matches!(rx.recv().await, Some(Message::LogcatDied)));
         task.await.expect("file feed joins");
+    }
+
+    #[test]
+    fn test_segmented_replay_bounds() {
+        // An empty view has no replay.
+        assert_eq!(replay_state_for(0), None);
+        // Small buffers replay everything in order.
+        assert_eq!(replay_state_for(5), Some(ReplayState { next: 0, end: 5 }));
+        // Large buffers only repaint the newest MAX_REPLAY entries.
+        assert_eq!(
+            replay_state_for(MAX_REPLAY + 7),
+            Some(ReplayState {
+                next: 7,
+                end: MAX_REPLAY + 7
+            })
+        );
+        // Chunk boundaries clamp to the end and never overflow.
+        assert_eq!(next_replay_chunk_end(0, 3), 3);
+        assert_eq!(next_replay_chunk_end(5, REPLAY_CHUNK + 5), REPLAY_CHUNK + 5);
+        assert_eq!(next_replay_chunk_end(usize::MAX, usize::MAX), usize::MAX);
     }
 
     #[test]

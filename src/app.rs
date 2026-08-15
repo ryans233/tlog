@@ -411,12 +411,14 @@ impl App {
     pub fn begin_search(&mut self) {
         self.search_input = self.search_query.clone().unwrap_or_default();
         self.search_cursor = self.search_input.len();
+        let closing_help = self.show_help;
         self.show_help = false;
         self.status_message = None;
         self.status_is_error = false;
         // Closing the help overlay changes the viewport height; re-home the
-        // bottom bar before the search query is applied.
-        self.needs_replay = true;
+        // bottom bar before the search query is applied. When help was already
+        // closed there is nothing to repaint yet.
+        self.needs_replay |= closing_help;
         self.focus = Focus::SearchInput;
     }
 
