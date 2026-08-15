@@ -12,7 +12,6 @@ and_expr = { not_expr ~ (("&" ~ not_expr) | not_expr)* }
 not_expr = {
     term
     | "-" ~ term
-    | "-" ~ "(" ~ or_expr ~ ")"
 }
 
 term = {

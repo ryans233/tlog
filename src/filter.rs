@@ -56,25 +56,30 @@ impl fmt::Display for Key {
 }
 
 /// A single predicate: `key:value` or `-key~:value`.
+///
+/// `regex` holds the pattern compiled once at filter-compile time so that
+/// evaluation never pays the `Regex::new` cost per entry.
 #[derive(Clone, Debug)]
 pub struct Predicate {
     pub key: Key,
     pub value: String,
     pub negate: bool,
-    pub regex: bool,
+    pub regex: Option<Regex>,
 }
 
 /// Filter expression AST.
 ///
 /// Evaluated against each `LogEntry` to determine visibility.
-/// `AgeSince` is a special node whose cutoff is refreshed each tick.
 #[derive(Clone, Debug)]
 pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
+    Not(Box<Expr>),
     Pred(Predicate),
     /// Match entries newer than the stored cutoff time.
-    /// The cutoff is updated each tick to `now - duration`.
+    ///
+    /// The cutoff is fixed when the filter is compiled (`now - duration` at
+    /// compile time), not refreshed on ticks. See `README` / `AGENTS.md`.
     AgeSince {
         cutoff: DateTime<Local>,
     },
@@ -89,6 +94,7 @@ enum FilterToken {
         negate: bool,
         regex: bool,
     },
+    Not,
     And,
     Or,
     OpenParen,
@@ -107,20 +113,18 @@ pub fn compile(input: &str, msgs: &crate::i18n::Messages) -> Result<Expr, String
             key: Key::Name,
             value: String::new(),
             negate: false,
-            regex: false,
+            regex: None,
         }));
     }
 
-    let pairs = FilterParser::parse(Rule::query, trimmed)
-        .map_err(|e| msgs.parse_error(&e.to_string()))?;
+    let pairs =
+        FilterParser::parse(Rule::query, trimmed).map_err(|e| msgs.parse_error(&e.to_string()))?;
 
     let mut tokens: Vec<FilterToken> = Vec::new();
 
     for pair in pairs {
-        collect_tokens(pair, &mut tokens)?;
+        collect_tokens(pair, &mut tokens, msgs)?;
     }
-
-
 
     // Stage 1: merge adjacent same-key non-negated predicates into OR groups.
     let tokens = merge_same_key_or(tokens);
@@ -133,11 +137,29 @@ pub fn compile(input: &str, msgs: &crate::i18n::Messages) -> Result<Expr, String
 }
 
 /// Recursively collect tokens from pest pairs.
-fn collect_tokens(pair: pest::iterators::Pair<Rule>, tokens: &mut Vec<FilterToken>) -> Result<(), String> {
+fn collect_tokens(
+    pair: pest::iterators::Pair<Rule>,
+    tokens: &mut Vec<FilterToken>,
+    msgs: &crate::i18n::Messages,
+) -> Result<(), String> {
     match pair.as_rule() {
-        Rule::query | Rule::term => {
+        Rule::query => {
             for inner in pair.into_inner() {
-                collect_tokens(inner, tokens)?;
+                collect_tokens(inner, tokens, msgs)?;
+            }
+        }
+        Rule::term => {
+            // Preserve explicit parentheses as tokens. Without this step,
+            // `(a | b) c` would be compiled as `a | (b & c)`.
+            let is_group = pair.as_str().starts_with('(');
+            if is_group {
+                tokens.push(FilterToken::OpenParen);
+            }
+            for inner in pair.into_inner() {
+                collect_tokens(inner, tokens, msgs)?;
+            }
+            if is_group {
+                tokens.push(FilterToken::CloseParen);
             }
         }
         Rule::or_expr => {
@@ -146,7 +168,7 @@ fn collect_tokens(pair: pest::iterators::Pair<Rule>, tokens: &mut Vec<FilterToke
                 if !first {
                     tokens.push(FilterToken::Or);
                 }
-                collect_tokens(inner, tokens)?;
+                collect_tokens(inner, tokens, msgs)?;
                 first = false;
             }
         }
@@ -154,7 +176,7 @@ fn collect_tokens(pair: pest::iterators::Pair<Rule>, tokens: &mut Vec<FilterToke
             // Just recurse — implicit AND is handled by apply_implicit_and later.
             // (Pest does not expose `&` nor space as separate inner pairs.)
             for inner in pair.into_inner() {
-                collect_tokens(inner, tokens)?;
+                collect_tokens(inner, tokens, msgs)?;
             }
         }
         Rule::bare_word => {
@@ -190,7 +212,7 @@ fn collect_tokens(pair: pest::iterators::Pair<Rule>, tokens: &mut Vec<FilterToke
                 }
             }
 
-            let key = key.ok_or_else(|| "未知过滤器键".to_string())?;
+            let key = key.ok_or_else(|| msgs.unknown_filter_key.to_string())?;
 
             tokens.push(FilterToken::Predicate {
                 key,
@@ -200,27 +222,39 @@ fn collect_tokens(pair: pest::iterators::Pair<Rule>, tokens: &mut Vec<FilterToke
             });
         }
         Rule::not_expr => {
-            // Pest consumes the `-` literal as part of pattern matching,
-            // but it does NOT appear as a separate inner pair.
-            // Detect negation by checking if the full matched text starts with `-`.
+            // Pest consumes the `-` literal as part of pattern matching, but it
+            // does NOT appear as a separate inner pair. Detect negation from
+            // the matched text.
             let is_negated = pair.as_str().starts_with('-');
             let inner_pairs: Vec<_> = pair.clone().into_inner().collect();
 
             let mut sub_tokens: Vec<FilterToken> = Vec::new();
             for inner in &inner_pairs {
-                collect_tokens((*inner).clone(), &mut sub_tokens)?;
+                collect_tokens((*inner).clone(), &mut sub_tokens, msgs)?;
             }
 
             if is_negated {
-                for token in sub_tokens {
-                    match token {
-                        FilterToken::Predicate { key, value, negate: _, regex } => {
-                            tokens.push(FilterToken::Predicate {
-                                key, value, negate: true, regex,
-                            });
-                        }
-                        other => tokens.push(other),
-                    }
+                // `-tag:foo` is just a negated predicate. Anything more
+                // complex (`-(tag:foo | tag:bar)`) must be wrapped in an
+                // Expr::Not so the negation applies to the whole group.
+                if let [
+                    FilterToken::Predicate {
+                        key,
+                        value,
+                        negate: _,
+                        regex,
+                    },
+                ] = sub_tokens.as_slice()
+                {
+                    tokens.push(FilterToken::Predicate {
+                        key: key.clone(),
+                        value: value.clone(),
+                        negate: true,
+                        regex: *regex,
+                    });
+                } else {
+                    tokens.push(FilterToken::Not);
+                    tokens.extend(sub_tokens);
                 }
             } else {
                 tokens.extend(sub_tokens);
@@ -261,40 +295,44 @@ fn merge_same_key_or(tokens: Vec<FilterToken>) -> Vec<FilterToken> {
         let token = &tokens[i];
 
         if let FilterToken::Predicate { key, negate, .. } = token
-            && !negate {
-                // Collect run of same-key non-negated predicates
-                let run_key = key.clone();
-                let mut run: Vec<FilterToken> = Vec::new();
-                while i < tokens.len() {
-                    if let FilterToken::Predicate { key: k, negate: n, .. } = &tokens[i] {
-                        if k == &run_key && !n {
-                            run.push(tokens[i].clone());
-                            i += 1;
-                        } else {
-                            break;
-                        }
+            && !negate
+        {
+            // Collect run of same-key non-negated predicates
+            let run_key = key.clone();
+            let mut run: Vec<FilterToken> = Vec::new();
+            while i < tokens.len() {
+                if let FilterToken::Predicate {
+                    key: k, negate: n, ..
+                } = &tokens[i]
+                {
+                    if k == &run_key && !n {
+                        run.push(tokens[i].clone());
+                        i += 1;
                     } else {
                         break;
                     }
-                }
-
-                if run.len() == 1 {
-                    result.push(run.into_iter().next().unwrap());
                 } else {
-                    // Merge into OR group: push tokens with OR separators
-                    let run_len = run.len();
-                    for (j, tok) in run.into_iter().enumerate() {
-                        if j > 0 {
-                            result.push(FilterToken::Or);
-                        }
-                        result.push(tok);
-                    }
-                    // Wrap in parentheses for correct precedence
-                    result.insert(result.len() - (2 * run_len - 1), FilterToken::OpenParen);
-                    result.push(FilterToken::CloseParen);
+                    break;
                 }
-                continue;
             }
+
+            if run.len() == 1 {
+                result.push(run.into_iter().next().unwrap());
+            } else {
+                // Merge into OR group: push tokens with OR separators
+                let run_len = run.len();
+                for (j, tok) in run.into_iter().enumerate() {
+                    if j > 0 {
+                        result.push(FilterToken::Or);
+                    }
+                    result.push(tok);
+                }
+                // Wrap in parentheses for correct precedence
+                result.insert(result.len() - (2 * run_len - 1), FilterToken::OpenParen);
+                result.push(FilterToken::CloseParen);
+            }
+            continue;
+        }
 
         result.push(tokens[i].clone());
         i += 1;
@@ -303,7 +341,11 @@ fn merge_same_key_or(tokens: Vec<FilterToken>) -> Vec<FilterToken> {
     result
 }
 
-/// Apply implicit AND between adjacent tokens that aren't separated by an operator.
+/// Apply implicit AND between adjacent operands.
+///
+/// An operand can end with a predicate or `)`, and the next operand can start
+/// with a predicate, `(` or a unary `Not`. `a b`, `a (b)`, `(a) b` and
+/// `a -b` therefore all get an explicit `And` inserted between them.
 fn apply_implicit_and(tokens: Vec<FilterToken>) -> Vec<FilterToken> {
     let mut result: Vec<FilterToken> = Vec::new();
 
@@ -311,24 +353,17 @@ fn apply_implicit_and(tokens: Vec<FilterToken>) -> Vec<FilterToken> {
         result.push(token.clone());
 
         if i + 1 < tokens.len() {
-            let current_is_value = matches!(
+            let current_ends_operand = matches!(
                 token,
                 FilterToken::Predicate { .. } | FilterToken::CloseParen
             );
-            let next_is_value = matches!(
+            let next_starts_operand = matches!(
                 &tokens[i + 1],
-                FilterToken::Predicate { .. } | FilterToken::OpenParen
+                FilterToken::Predicate { .. } | FilterToken::OpenParen | FilterToken::Not
             );
-            let current_is_not_operator = !matches!(token, FilterToken::And | FilterToken::Or | FilterToken::OpenParen);
-            let next_is_not_operator = !matches!(&tokens[i + 1], FilterToken::And | FilterToken::Or | FilterToken::CloseParen);
 
-            if current_is_value && next_is_value {
+            if current_ends_operand && next_starts_operand {
                 result.push(FilterToken::And);
-            } else if current_is_not_operator && next_is_not_operator
-                && !matches!(token, FilterToken::CloseParen)
-                && !matches!(&tokens[i + 1], FilterToken::OpenParen)
-            {
-                // Need implicit AND between e.g. a predicate and the next predicate/paren
             }
         }
     }
@@ -338,7 +373,11 @@ fn apply_implicit_and(tokens: Vec<FilterToken>) -> Vec<FilterToken> {
 
 /// Build AST from token stream using recursive descent with precedence.
 /// Precedence: & binds tighter than |
-fn build_ast(tokens: &[FilterToken], pos: usize, msgs: &crate::i18n::Messages) -> Result<(Expr, usize), String> {
+fn build_ast(
+    tokens: &[FilterToken],
+    pos: usize,
+    msgs: &crate::i18n::Messages,
+) -> Result<(Expr, usize), String> {
     let (mut left, mut pos) = build_and(tokens, pos, msgs)?;
 
     while pos < tokens.len() {
@@ -359,7 +398,11 @@ fn build_ast(tokens: &[FilterToken], pos: usize, msgs: &crate::i18n::Messages) -
     Ok((left, pos))
 }
 
-fn build_and(tokens: &[FilterToken], pos: usize, msgs: &crate::i18n::Messages) -> Result<(Expr, usize), String> {
+fn build_and(
+    tokens: &[FilterToken],
+    pos: usize,
+    msgs: &crate::i18n::Messages,
+) -> Result<(Expr, usize), String> {
     let (mut left, mut pos) = build_primary(tokens, pos, msgs)?;
 
     while pos < tokens.len() {
@@ -378,15 +421,28 @@ fn build_and(tokens: &[FilterToken], pos: usize, msgs: &crate::i18n::Messages) -
     Ok((left, pos))
 }
 
-fn build_primary(tokens: &[FilterToken], pos: usize, msgs: &crate::i18n::Messages) -> Result<(Expr, usize), String> {
+fn build_primary(
+    tokens: &[FilterToken],
+    pos: usize,
+    msgs: &crate::i18n::Messages,
+) -> Result<(Expr, usize), String> {
     if pos >= tokens.len() {
         return Err(msgs.unexpected_token.to_string());
     }
 
     match &tokens[pos] {
-        FilterToken::Predicate { key, value, negate, regex } => {
+        FilterToken::Predicate {
+            key,
+            value,
+            negate,
+            regex,
+        } => {
             let expr = make_predicate(key, value, *negate, *regex, msgs)?;
             Ok((expr, pos + 1))
+        }
+        FilterToken::Not => {
+            let (inner, new_pos) = build_primary(tokens, pos + 1, msgs)?;
+            Ok((Expr::Not(Box::new(inner)), new_pos))
         }
         FilterToken::OpenParen => {
             let (expr, pos) = build_ast(tokens, pos + 1, msgs)?;
@@ -399,42 +455,61 @@ fn build_primary(tokens: &[FilterToken], pos: usize, msgs: &crate::i18n::Message
         _ => Err(format!("{}: {:?}", msgs.unexpected_token, tokens[pos])),
     }
 }
-fn make_predicate(key: &Key, value: &str, negate: bool, regex: bool, msgs: &crate::i18n::Messages) -> Result<Expr, String> {
+fn make_predicate(
+    key: &Key,
+    value: &str,
+    negate: bool,
+    regex: bool,
+    msgs: &crate::i18n::Messages,
+) -> Result<Expr, String> {
     match key {
         Key::Age => {
             let duration = parse_duration(value, msgs)?;
             let cutoff = Local::now() - duration;
+            let age = Expr::AgeSince { cutoff };
+            // Negative age filters use the same compile-time cutoff: `-age:5m`
+            // means "older than the 5-minute window anchored at compile time".
             Ok(if negate {
-                Expr::Pred(Predicate {
-                    key: Key::Age,
-                    value: value.to_string(),
-                    negate: true,
-                    regex: false,
-                })
+                Expr::Not(Box::new(age))
             } else {
-                Expr::AgeSince {
-                    cutoff,
-                }
+                age
             })
         }
-        Key::Name => {
-            // name: is a no-op — always matches
-            Ok(Expr::Pred(Predicate {
-                key: Key::Name,
-                value: value.to_string(),
-                negate,
-                regex,
-            }))
-        }
-        _ => {
+        Key::Level | Key::Is => {
+            // These keys have fixed value semantics; a `~` modifier has no
+            // effect, matching the previous behavior.
             Ok(Expr::Pred(Predicate {
                 key: key.clone(),
                 value: value.to_string(),
                 negate,
-                regex,
+                regex: None,
+            }))
+        }
+        _ => {
+            let compiled = compile_regex(regex, value, msgs)?;
+            Ok(Expr::Pred(Predicate {
+                key: key.clone(),
+                value: value.to_string(),
+                negate,
+                regex: compiled,
             }))
         }
     }
+}
+
+/// Compile a regex modifier pattern, surfacing invalid patterns as filter
+/// errors instead of silently matching nothing during evaluation.
+fn compile_regex(
+    regex: bool,
+    value: &str,
+    msgs: &crate::i18n::Messages,
+) -> Result<Option<Regex>, String> {
+    if !regex {
+        return Ok(None);
+    }
+    Regex::new(value)
+        .map(Some)
+        .map_err(|e| msgs.invalid_regex(&e.to_string()))
 }
 
 /// Parse a human-readable duration string like `5m`, `30s`, `1h`, `2d`.
@@ -468,12 +543,9 @@ impl Expr {
     /// Evaluate this expression against a log entry.
     pub fn evaluate(&self, entry: &LogEntry) -> bool {
         match self {
-            Expr::And(left, right) => {
-                left.evaluate(entry) && right.evaluate(entry)
-            }
-            Expr::Or(left, right) => {
-                left.evaluate(entry) || right.evaluate(entry)
-            }
+            Expr::And(left, right) => left.evaluate(entry) && right.evaluate(entry),
+            Expr::Or(left, right) => left.evaluate(entry) || right.evaluate(entry),
+            Expr::Not(inner) => !inner.evaluate(entry),
             Expr::Pred(p) => evaluate_predicate(p, entry),
             Expr::AgeSince { cutoff, .. } => {
                 if let chrono::MappedLocalTime::Single(ts) =
@@ -490,45 +562,37 @@ impl Expr {
 
 fn evaluate_predicate(p: &Predicate, entry: &LogEntry) -> bool {
     let result = match p.key {
-        Key::Tag => {
-            let tag = &entry.tag;
-            if p.regex {
-                match Regex::new(&p.value) {
-                    Ok(re) => re.is_match(tag),
-                    Err(_) => false,
-                }
-            } else {
-                tag.contains(&p.value)
-            }
-        }
+        Key::Tag => match p.regex.as_ref() {
+            Some(re) => re.is_match(&entry.tag),
+            None => entry.tag.contains(&p.value),
+        },
         Key::Package | Key::Process => {
+            // `package:mine` has no project context in tlog, so it matches
+            // every entry (README documents this as the intended behavior).
+            if matches!(p.key, Key::Package) && p.regex.is_none() && p.value == "mine" {
+                return !p.negate;
+            }
+
             // Use resolved package name if available, fall back to PID string.
             let target = entry.package.as_deref().unwrap_or("");
             if target.is_empty() {
                 // No package resolved yet — match against PID as fallback
                 let pid_str = entry.pid.to_string();
-                if p.regex {
-                    Regex::new(&p.value).is_ok_and(|re| re.is_match(&pid_str))
-                } else {
-                    pid_str.contains(&p.value)
-                }
-            } else if p.regex {
-                Regex::new(&p.value).is_ok_and(|re| re.is_match(target))
-            } else {
-                target.contains(&p.value)
-            }
-        }
-        Key::Message => {
-            let msg = &entry.message;
-            if p.regex {
-                match Regex::new(&p.value) {
-                    Ok(re) => re.is_match(msg),
-                    Err(_) => false,
+                match p.regex.as_ref() {
+                    Some(re) => re.is_match(&pid_str),
+                    None => pid_str.contains(&p.value),
                 }
             } else {
-                msg.contains(&p.value)
+                match p.regex.as_ref() {
+                    Some(re) => re.is_match(target),
+                    None => target.contains(&p.value),
+                }
             }
         }
+        Key::Message => match p.regex.as_ref() {
+            Some(re) => re.is_match(&entry.message),
+            None => entry.message.contains(&p.value),
+        },
         Key::Level => {
             // Level filtering uses >= semantics (e.g., level:INFO matches INFO and above)
             let target = match p.value.to_uppercase().as_str() {
@@ -630,7 +694,10 @@ mod tests {
         assert!(expr.evaluate(&entry2), "level:ERROR & tag:bar should match");
 
         let entry3 = make_entry("bar", "msg", LogLevel::Info);
-        assert!(!expr.evaluate(&entry3), "tag:bar without ERROR should not match");
+        assert!(
+            !expr.evaluate(&entry3),
+            "tag:bar without ERROR should not match"
+        );
     }
 
     #[test]
@@ -691,7 +758,8 @@ mod tests {
         let now = Local::now().naive_local();
         let entry_old = LogEntry {
             timestamp: now - TimeDelta::minutes(10),
-            pid: 0, tid: 0,
+            pid: 0,
+            tid: 0,
             level: LogLevel::Info,
             tag: "T".into(),
             message: "old".into(),
@@ -699,7 +767,8 @@ mod tests {
         };
         let entry_recent = LogEntry {
             timestamp: now - TimeDelta::minutes(2),
-            pid: 0, tid: 0,
+            pid: 0,
+            tid: 0,
             level: LogLevel::Info,
             tag: "T".into(),
             message: "recent".into(),
@@ -707,8 +776,42 @@ mod tests {
         };
 
         let expr = compile("age:5m", &crate::i18n::EN).unwrap();
-        assert!(!expr.evaluate(&entry_old), "10min old should not pass age:5m");
+        assert!(
+            !expr.evaluate(&entry_old),
+            "10min old should not pass age:5m"
+        );
         assert!(expr.evaluate(&entry_recent), "2min old should pass age:5m");
+    }
+
+    #[test]
+    fn test_negated_age_filter() {
+        use chrono::{Local, TimeDelta};
+        let now = Local::now().naive_local();
+        let entry_old = LogEntry {
+            timestamp: now - TimeDelta::minutes(10),
+            pid: 0,
+            tid: 0,
+            level: LogLevel::Info,
+            tag: "T".into(),
+            message: "old".into(),
+            package: None,
+        };
+        let entry_recent = LogEntry {
+            timestamp: now - TimeDelta::minutes(2),
+            pid: 0,
+            tid: 0,
+            level: LogLevel::Info,
+            tag: "T".into(),
+            message: "recent".into(),
+            package: None,
+        };
+
+        let expr = compile("-age:5m", &crate::i18n::EN).unwrap();
+        assert!(expr.evaluate(&entry_old), "10min old should pass -age:5m");
+        assert!(
+            !expr.evaluate(&entry_recent),
+            "2min old should not pass -age:5m"
+        );
     }
 
     #[test]
@@ -749,5 +852,72 @@ mod tests {
         let expr = compile("name:MySavedFilter", &crate::i18n::EN).unwrap();
         let entry = make_entry("AnyTag", "any msg", LogLevel::Info);
         assert!(expr.evaluate(&entry), "name: should be a no-op");
+    }
+
+    #[test]
+    fn test_explicit_parentheses_precedence() {
+        // (tag:foo | tag:bar) message:hello
+        // must be (foo OR bar) AND hello, not foo OR (bar AND hello).
+        let expr = compile("(tag:foo | tag:bar) message:hello", &crate::i18n::EN).unwrap();
+
+        assert!(expr.evaluate(&make_entry("foo", "hello", LogLevel::Info)));
+        assert!(expr.evaluate(&make_entry("bar", "hello", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("foo", "bye", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("baz", "hello", LogLevel::Info)));
+    }
+
+    #[test]
+    fn test_negated_group_or() {
+        // -(tag:foo | tag:bar) == NOT(foo OR bar) == -foo AND -bar
+        let expr = compile("-(tag:foo | tag:bar)", &crate::i18n::EN).unwrap();
+
+        assert!(!expr.evaluate(&make_entry("foo", "msg", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("bar", "msg", LogLevel::Info)));
+        assert!(expr.evaluate(&make_entry("baz", "msg", LogLevel::Info)));
+    }
+
+    #[test]
+    fn test_negated_group_and() {
+        // -(tag:foo tag:bar) == NOT(foo OR bar) after implicit same-key OR.
+        let expr = compile("-(tag:foo tag:bar)", &crate::i18n::EN).unwrap();
+
+        assert!(!expr.evaluate(&make_entry("foo", "msg", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("bar", "msg", LogLevel::Info)));
+        assert!(expr.evaluate(&make_entry("baz", "msg", LogLevel::Info)));
+    }
+
+    #[test]
+    fn test_negated_group_with_following_and() {
+        // -(tag:foo | tag:bar) message:hello == -foo AND -bar AND hello
+        let expr = compile("-(tag:foo | tag:bar) message:hello", &crate::i18n::EN).unwrap();
+
+        assert!(!expr.evaluate(&make_entry("foo", "hello", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("bar", "hello", LogLevel::Info)));
+        assert!(expr.evaluate(&make_entry("baz", "hello", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("baz", "bye", LogLevel::Info)));
+    }
+
+    #[test]
+    fn test_package_mine_matches_all() {
+        let expr = compile("package:mine", &crate::i18n::EN).unwrap();
+        let unresolved = make_entry("T", "msg", LogLevel::Info);
+        let mut resolved = make_entry("T", "msg", LogLevel::Info);
+        resolved.package = Some("com.example.app".to_string());
+        assert!(expr.evaluate(&unresolved));
+        assert!(expr.evaluate(&resolved));
+
+        let negated = compile("-package:mine", &crate::i18n::EN).unwrap();
+        assert!(!negated.evaluate(&unresolved));
+        assert!(!negated.evaluate(&resolved));
+    }
+
+    #[test]
+    fn test_invalid_regex_rejected_at_compile() {
+        assert!(compile("tag~:[", &crate::i18n::EN).is_err());
+        assert!(compile("message~:(unclosed", &crate::i18n::EN).is_err());
+        // A valid pattern is compiled once and still evaluates correctly.
+        let expr = compile("tag~:^Main.*", &crate::i18n::EN).unwrap();
+        assert!(expr.evaluate(&make_entry("MainActivity", "msg", LogLevel::Info)));
+        assert!(!expr.evaluate(&make_entry("Other", "msg", LogLevel::Info)));
     }
 }

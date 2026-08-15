@@ -42,8 +42,8 @@ pub struct Messages {
     pub adb_not_found_url: &'static str,
 
     // ── Status bar ──────────────────────────────────────────────────────
-    pub status_bar: &'static str,       // "共{}条 | 显示{}条 | {}"
-    pub filter_title: &'static str,      // " 过滤器 ({}) "
+    pub status_bar: &'static str,          // "共{}条 | 显示{}条 | {}"
+    pub filter_title: &'static str,        // " 过滤器 ({}) "
     pub filter_error_prefix: &'static str, // "错误: {}"
 
     // ── Run-state indicator ─────────────────────────────────────────────
@@ -63,6 +63,8 @@ pub struct Messages {
     pub unexpected_token: &'static str,
     pub age_needs_value: &'static str,
     pub invalid_age_value: &'static str,
+    pub invalid_regex: &'static str,
+    pub unknown_filter_key: &'static str,
 
     // ── Help screen ─────────────────────────────────────────────────────
     pub help_title: &'static str,
@@ -112,7 +114,6 @@ pub struct Messages {
 }
 
 impl Messages {
-
     pub fn adb_not_found_full(&self, cmd: &str) -> String {
         format!(
             "{}{}\n{}\n  {}",
@@ -143,6 +144,9 @@ impl Messages {
         self.invalid_age_value.replacen("{}", s, 1)
     }
 
+    pub fn invalid_regex(&self, s: &str) -> String {
+        self.invalid_regex.replacen("{}", s, 1)
+    }
 }
 
 pub const EN: Messages = Messages {
@@ -168,6 +172,8 @@ pub const EN: Messages = Messages {
     unexpected_token: "Unexpected token",
     age_needs_value: "age filter needs a value, e.g. age:5m",
     invalid_age_value: "Invalid age value: '{}'",
+    invalid_regex: "Invalid regex: {}",
+    unknown_filter_key: "Unknown filter key",
 
     help_title: "── Keybindings ───────────────────────────",
     help_quit: "Quit",
@@ -235,6 +241,8 @@ pub const ZH: Messages = Messages {
     unexpected_token: "意外的 token",
     age_needs_value: "age 过滤器需要值，例如 age:5m",
     invalid_age_value: "无效的 age 值: '{}'",
+    invalid_regex: "无效的正则表达式: {}",
+    unknown_filter_key: "未知过滤器键",
 
     help_title: "── 快捷键 ──────────────────────────────",
     help_quit: "退出程序",
