@@ -2,6 +2,39 @@
 
 All notable changes to tlog are documented in this file.
 
+## [1.4.0] - 2026-08-16
+
+### Added
+- Segmented replay: filter/search/settings changes now repaint the latest
+  10,000 entries in 128-line chunks, yielding to the event loop between chunks
+  and deferring newly arrived lines until the replay finishes so scrollback
+  order stays chronological.
+- Regression benchmark target `benches/replay.rs` (`cargo bench --bench replay`)
+  covering 100k-entry pushes, eviction, filter rebuilds, and 10k-entry replay
+  formatting with and without search highlighting. `--quick` runs one
+  iteration for CI smoke testing.
+- Reusable quality-gates workflow (`.github/workflows/quality.yml`) used by CI
+  and tag releases; tag releases now run format/lint/test/bench smoke before
+  any release build.
+- Release artifacts now include SHA256 checksums and standard
+  `tlog-<target>.tar.gz` / `.zip` archives that `cargo-binstall` can consume
+  directly from GitHub Releases.
+- Ready-to-publish Homebrew, Scoop, and AUR templates under `packaging/`.
+- Illustrative demo GIF plus the full `tlog --help` reference in both READMEs.
+- Package metadata (`repository`, `license`, `description`) for installers and
+  package managers.
+
+### Changed
+- CI now delegates its checks to the reusable quality workflow and additionally
+  runs the benchmark smoke test.
+- Release builds keep the existing raw binary names for backwards
+  compatibility while adding standard archive names and checksum files.
+
+### Performance
+- Filter changes on a full buffer no longer block the UI for the entire
+  replay; each iteration repaints at most 128 lines before processing keys,
+  resize, ticks, and channel messages again.
+
 ## [1.3.0] - 2026-08-16
 
 ### Added

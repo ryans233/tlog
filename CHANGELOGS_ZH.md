@@ -2,6 +2,32 @@
 
 本文件记录了 tlog 的所有重要变更。
 
+## [1.4.0] - 2026-08-16
+
+### 新增
+- 分段回放：过滤器/搜索/设置变更后，最近 1 万条日志按每轮 128 行分段重绘，
+  在块之间让出事件循环；回放期间新到达的行会暂存，回放完成后再按时间顺序
+  写入 scrollback。
+- 回归基准 `benches/replay.rs`（`cargo bench --bench replay`），覆盖 10 万条
+  push、驱逐、过滤重建，以及 1 万条回放格式化（普通与搜索高亮）；`--quick`
+  以单次迭代供 CI 冒烟。
+- 可复用的质量门禁 workflow（`.github/workflows/quality.yml`），CI 与 tag 发布
+  共用；tag 发布会先通过格式/lint/测试/基准冒烟，再开始发布构建。
+- Release 产物新增 SHA256 校验文件和 `tlog-<target>.tar.gz` / `.zip` 标准归档，
+  `cargo-binstall` 可直接从 GitHub Releases 安装。
+- `packaging/` 下新增可直接发布的 Homebrew、Scoop 与 AUR 模板。
+- 双语文档新增演示 GIF 与完整 `tlog --help` 参考。
+- 为安装器/包管理器补充 `repository`、`license`、`description` 元数据。
+
+### 变更
+- CI 改为调用可复用质量 workflow，并新增基准冒烟步骤。
+- Release 构建保留原有原始二进制命名以兼容旧链接，同时新增标准归档名与
+  校验文件。
+
+### 性能
+- 缓冲区满载时切换过滤器不再阻塞整个回放：每轮最多重绘 128 行，随后继续
+  处理按键、Resize、tick 与日志消息。
+
 ## [1.3.0] - 2026-08-16
 
 ### 新增
