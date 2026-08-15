@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::filter::Expr;
 use crate::logcat::LogEntry;
@@ -115,6 +115,19 @@ impl LogBuffer {
         let idx = *self.filtered.get(pos)?;
         self.entries.get(idx).map(|e| (idx, e))
     }
+
+    /// Backfill missing package names from a PID→package map.
+    ///
+    /// Filtered indices are untouched because this only mutates entry fields.
+    pub fn resolve_packages(&mut self, map: &HashMap<u32, String>) {
+        for entry in &mut self.entries {
+            if entry.package.is_none()
+                && let Some(package) = map.get(&entry.pid)
+            {
+                entry.package = Some(package.clone());
+            }
+        }
+    }
 }
 
 impl Default for LogBuffer {
@@ -165,6 +178,28 @@ mod tests {
         let (_, first) = buf.get_filtered(0).unwrap();
         // Should not be "msg0" — that was evicted
         assert_ne!(first.message, "msg0");
+    }
+
+    #[test]
+    fn test_resolve_packages_backfills_missing_only() {
+        let mut buf = LogBuffer::new();
+        let mut with_package = make_entry("A", "one");
+        with_package.package = Some("keep.me".to_string());
+        let mut missing = make_entry("B", "two");
+        missing.pid = 42;
+        buf.push(with_package, None);
+        buf.push(missing, None);
+
+        let map = HashMap::from([(42u32, "com.example".to_string())]);
+        buf.resolve_packages(&map);
+        assert_eq!(
+            buf.get_filtered(0).unwrap().1.package.as_deref(),
+            Some("keep.me")
+        );
+        assert_eq!(
+            buf.get_filtered(1).unwrap().1.package.as_deref(),
+            Some("com.example")
+        );
     }
 
     #[test]

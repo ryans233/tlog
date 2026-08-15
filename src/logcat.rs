@@ -1,6 +1,8 @@
 #[cfg(test)]
+use chrono::TimeZone;
+#[cfg(test)]
 use chrono::Timelike;
-use chrono::{Datelike, NaiveDateTime};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime};
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -68,6 +70,8 @@ pub enum Message {
     ProcessDied { pid: u32 },
     /// The logcat subprocess exited.
     LogcatDied,
+    /// The logcat feed started (or restarted after a reconnect).
+    LogcatStarted,
     /// Periodic UI tick.
     Tick,
 }
@@ -114,6 +118,11 @@ fn truncate_to_boundary(s: &str, max_bytes: usize) -> &str {
 ///   32:    ' '
 ///   33+:   TAG: MESSAGE
 pub fn parse_line(line: &str) -> Option<LogEntry> {
+    parse_line_with_now(line, Local::now())
+}
+
+/// Parse a `threadtime` line, using `now` to infer the missing year.
+fn parse_line_with_now(line: &str, now: DateTime<Local>) -> Option<LogEntry> {
     // Minimum length check: "MM-DD HH:MM:SS.mmm  PID  TID L TAG: MESSAGE"
     // The shortest valid line is approximately 33 + 3 chars (tag: at least 1 char + ": " + message).
     if line.len() < 37 {
@@ -248,11 +257,13 @@ pub fn parse_line(line: &str) -> Option<LogEntry> {
     let tag = truncate_to_boundary(&rest[..colon_space], MAX_TAG_BYTES);
     let message = truncate_to_boundary(&rest[colon_space + 2..], MAX_MSG_BYTES);
 
-    // Build timestamp: use current year since logcat doesn't include it
-    let now = chrono::Local::now();
+    // Logcat timestamps have no year. Infer the nearest year: if the parsed
+    // month/day is more than ~6 months away from `now`, it belongs to the
+    // previous or next year (handles the Dec/Jan boundary).
+    let year = infer_year(now, month, day);
     let ts = NaiveDateTime::new(
-        chrono::NaiveDate::from_ymd_opt(now.year(), month, day)?,
-        chrono::NaiveTime::from_hms_milli_opt(hour, min, sec, ms)?,
+        NaiveDate::from_ymd_opt(year, month, day)?,
+        NaiveTime::from_hms_milli_opt(hour, min, sec, ms)?,
     );
 
     Some(LogEntry {
@@ -264,6 +275,26 @@ pub fn parse_line(line: &str) -> Option<LogEntry> {
         message: message.to_owned(),
         package: None,
     })
+}
+
+/// Infer the year for a month/day timestamp using the current local date.
+///
+/// The logcat format omits the year. If the date is more than 183 days ahead
+/// of today, it is assumed to belong to the previous year; more than 183 days
+/// behind, the next year.
+fn infer_year(now: DateTime<Local>, month: u32, day: u32) -> i32 {
+    let current = now.year();
+    let today = now.date_naive();
+    for year in [current, current - 1, current + 1] {
+        let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+            continue;
+        };
+        let days = (date - today).num_days();
+        if (-183..=183).contains(&days) {
+            return year;
+        }
+    }
+    current
 }
 
 /// Parse a 5-character right-aligned numeric field (PID/TID).
@@ -474,6 +505,39 @@ mod tests {
         assert_eq!(truncate_to_boundary(s2, 1), "h"); // can't split é
         assert_eq!(truncate_to_boundary(s2, 2), "h");
         assert_eq!(truncate_to_boundary(s2, 3), "hé");
+    }
+
+    #[test]
+    fn test_parse_line_infers_previous_and_next_year() {
+        let now = Local
+            .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
+            .single()
+            .expect("valid local datetime");
+
+        let line = "12-31 23:59:59.999  1234  5678 I Tag: new year";
+        let entry = parse_line_with_now(line, now).expect("should parse");
+        assert_eq!(entry.timestamp.year(), 2025);
+
+        let line = "01-01 00:00:00.000  1234  5678 I Tag: same year";
+        let entry = parse_line_with_now(line, now).expect("should parse");
+        assert_eq!(entry.timestamp.year(), 2026);
+
+        let now = Local
+            .with_ymd_and_hms(2026, 12, 31, 12, 0, 0)
+            .single()
+            .expect("valid local datetime");
+        let line = "01-01 00:00:00.000  1234  5678 I Tag: next year";
+        let entry = parse_line_with_now(line, now).expect("should parse");
+        assert_eq!(entry.timestamp.year(), 2027);
+    }
+
+    #[test]
+    fn test_infer_year_returns_current_as_fallback() {
+        let now = Local
+            .with_ymd_and_hms(2026, 6, 1, 12, 0, 0)
+            .single()
+            .expect("valid local datetime");
+        assert_eq!(infer_year(now, 7, 1), 2026);
     }
 
     #[test]

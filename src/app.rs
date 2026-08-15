@@ -190,11 +190,33 @@ impl App {
             Message::LogcatDied => {
                 self.running = false;
             }
+            Message::LogcatStarted => {
+                self.running = true;
+            }
             Message::Tick => {
                 // Tick is only used for frame rendering; no filter refresh needed.
             }
         }
         true
+    }
+
+    /// Merge a `adb shell ps` seed map and backfill buffered entries.
+    ///
+    /// Called once after the startup seed task completes. If a package-aware
+    /// filter is active, rebuild the filtered view so entries that arrived
+    /// before the seed finished are re-evaluated with the resolved packages.
+    pub fn apply_seed_package_map(&mut self, map: HashMap<u32, String>) {
+        if map.is_empty() {
+            return;
+        }
+        self.pid_package_map.extend(map);
+        self.buffer.resolve_packages(&self.pid_package_map);
+        if !self.filter_bypassed
+            && let Some(filter) = self.active_filter.clone()
+        {
+            self.buffer.rebuild_filtered(Some(&filter));
+            self.needs_replay = true;
+        }
     }
 
     /// Apply the current filter input, recompiling and rebuilding.
