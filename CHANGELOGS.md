@@ -2,6 +2,16 @@
 
 All notable changes to tlog are documented in this file.
 
+## [1.4.1] - 2026-08-16
+
+### Fixed
+- Shift+E export now accepts both `Char('E')` and `Char('e') + SHIFT` key
+  reports, so CapsLock/Shift combinations can no longer fall through to the
+  quick `level:E` filter instead of exporting.
+- Export/save notices and filter errors are now rendered on the visible second
+  row of the bottom viewport; previously they were drawn one row outside the
+  viewport and silently disappeared.
+
 ## [1.4.0] - 2026-08-16
 
 ### Added
