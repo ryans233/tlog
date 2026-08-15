@@ -93,8 +93,8 @@ tag:foo tag:bar          # Same-key implicit OR
 tag:foo level:ERROR      # Different-key implicit AND
 
 # Special filters
-age:5m                   # Last 5 minutes
-age:1h                   # Last 1 hour
+age:5m                   # Last 5 minutes (window fixed at filter compile time)
+age:1h                   # Last 1 hour (window fixed at filter compile time)
 is:crash                 # FATAL EXCEPTION
 is:stacktrace            # Stack trace continuation lines
 package:com.example      # Package name filter (requires resolved PID)
@@ -107,7 +107,7 @@ package:mine             # Always true (no project context)
 ┌─ main.rs ─── Event loop (tokio::select!) ─────┐
 │  ├─ crossterm keyboard events                 │
 │  ├─ logcat child process stdout → channel     │
-│  └─ 250ms tick (age filter refresh)           │
+│  └─ 250ms tick (periodic frame rendering)     │
 ├─ logcat.rs ─ Log parsing + process lifecycle ─┤
 ├─ filter.rs ─ pest grammar → AST → evaluation ─┤
 ├─ buffer.rs ─ Ring buffer (100k hard cap) ─────┤

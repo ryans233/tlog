@@ -93,8 +93,8 @@ tag:foo tag:bar          # 同键隐式 OR
 tag:foo level:ERROR      # 不同键隐式 AND
 
 # 特殊过滤器
-age:5m                   # 最近 5 分钟
-age:1h                   # 最近 1 小时
+age:5m                   # 最近 5 分钟（窗口固定于过滤器编译时刻）
+age:1h                   # 最近 1 小时（窗口固定于过滤器编译时刻）
 is:crash                 # FATAL EXCEPTION
 is:stacktrace            # 堆栈延续行
 package:com.example      # 包名过滤（需先解析到）
@@ -107,7 +107,7 @@ package:mine             # 恒真（无项目上下文）
 ┌─ main.rs ─── 事件循环 (tokio::select!) ──┐
 │  ├─ crossterm 键盘事件                   │
 │  ├─ logcat 子进程 stdout → channel       │
-│  └─ 250ms tick（age 过滤器刷新）         │
+│  └─ 250ms tick（定时帧渲染）             │
 ├─ logcat.rs ─ 日志解析 + 进程生命周期 ────┤
 ├─ filter.rs ─ pest 语法 → AST → 求值 ─────┤
 ├─ buffer.rs ─ 环形缓冲区（100k 硬上限）───┤
