@@ -67,7 +67,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp "target/${{ matrix.target }}/release/${{ matrix.raw_asset }}" "${{ matrix.legacy_asset }}"
+          RAW_ASSET="target/${{ matrix.target }}/release/${{ matrix.raw_asset }}"
+          test -f "$RAW_ASSET"
+          cp "$RAW_ASSET" "${{ matrix.legacy_asset }}"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             python -c "import zipfile,pathlib,os; src=pathlib.Path(os.environ['RAW_ASSET']); dst=pathlib.Path(os.environ['ARCHIVE_ASSET']); archive=zipfile.ZipFile(dst,'w',zipfile.ZIP_DEFLATED); archive.write(src,arcname=src.name); archive.close()"
           else
@@ -76,7 +78,7 @@ jobs:
           fi
           python scripts/checksums.py "${{ matrix.legacy_asset }}" "${{ matrix.archive_asset }}" > SHA256SUMS
         env:
-          RAW_ASSET: ${{ matrix.raw_asset }}
+          RAW_ASSET: target/${{ matrix.target }}/release/${{ matrix.raw_asset }}
           ARCHIVE_ASSET: ${{ matrix.archive_asset }}
 
       - name: Upload artifacts
