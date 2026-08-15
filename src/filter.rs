@@ -530,6 +530,9 @@ fn try_parse_duration(s: &str) -> Option<Duration> {
     }
     let (num_str, unit) = s.split_at(s.len() - 1);
     let num: i64 = num_str.parse().ok()?;
+    if num <= 0 {
+        return None;
+    }
     match unit {
         "s" => Some(Duration::seconds(num)),
         "m" => Some(Duration::minutes(num)),
@@ -895,6 +898,13 @@ mod tests {
         assert!(!expr.evaluate(&make_entry("bar", "hello", LogLevel::Info)));
         assert!(expr.evaluate(&make_entry("baz", "hello", LogLevel::Info)));
         assert!(!expr.evaluate(&make_entry("baz", "bye", LogLevel::Info)));
+    }
+
+    #[test]
+    fn test_invalid_age_duration_rejected() {
+        assert!(compile("age:-5m", &crate::i18n::EN).is_err());
+        assert!(compile("age:0m", &crate::i18n::EN).is_err());
+        assert!(compile("age:5m", &crate::i18n::EN).is_ok());
     }
 
     #[test]
