@@ -43,7 +43,7 @@ artifacts also use `tlog-<target>.tar.gz` / `.zip` names, so
 them directly:
 
 ```bash
-cargo binstall tlog
+cargo binstall --repo ryans233/tlog tlog
 ```
 
 See `packaging/` for Homebrew, Scoop, and AUR package templates.

@@ -22,5 +22,5 @@ same archive names directly from GitHub Releases, no packaging repository
 required:
 
 ```bash
-cargo binstall tlog
+cargo binstall --repo ryans233/tlog tlog
 ```

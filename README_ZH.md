@@ -42,7 +42,7 @@ cargo install --path .
 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) 可以直接安装：
 
 ```bash
-cargo binstall tlog
+cargo binstall --repo ryans233/tlog tlog
 ```
 
 Homebrew、Scoop 与 AUR 的打包模板见 `packaging/` 目录。
