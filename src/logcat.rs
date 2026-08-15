@@ -1,6 +1,6 @@
-use chrono::{Datelike, NaiveDateTime};
 #[cfg(test)]
 use chrono::Timelike;
+use chrono::{Datelike, NaiveDateTime};
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -193,10 +193,16 @@ pub fn parse_line(line: &str) -> Option<LogEntry> {
     }
 
     // Parse millisecond (15-17)
-    if bytes.len() < 18 || !bytes[15].is_ascii_digit() || !bytes[16].is_ascii_digit() || !bytes[17].is_ascii_digit() {
+    if bytes.len() < 18
+        || !bytes[15].is_ascii_digit()
+        || !bytes[16].is_ascii_digit()
+        || !bytes[17].is_ascii_digit()
+    {
         return None;
     }
-    let ms: u32 = (bytes[15] - b'0') as u32 * 100 + (bytes[16] - b'0') as u32 * 10 + (bytes[17] - b'0') as u32;
+    let ms: u32 = (bytes[15] - b'0') as u32 * 100
+        + (bytes[16] - b'0') as u32 * 10
+        + (bytes[17] - b'0') as u32;
 
     // Check space at pos 18
     if bytes.get(18)? != &b' ' {
@@ -279,26 +285,20 @@ fn parse_5char_field(field: &[u8]) -> Option<u32> {
     Some(val)
 }
 
-
 // ── Process lifecycle detection ────────────────────────────────────────────
 
 /// Regex patterns for ActivityManager lifecycle events.
 /// Lazily compiled once, reused across all log lines.
-static PROC_START_51: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Start proc (\d+):([a-zA-Z0-9._:]+)/").unwrap()
-});
-static PROC_START_LEGACY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"Start proc ([a-zA-Z0-9._:]+) for .*: pid=(\d+)").unwrap()
-});
-static PROC_KILL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^Killing (\d+):([a-zA-Z0-9._:]+)/").unwrap()
-});
-static PROC_DEATH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^Process ([a-zA-Z0-9._:]+) \(pid (\d+)\) has died").unwrap()
-});
-static PROC_LEAVE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^No longer want ([a-zA-Z0-9._:]+) \(pid (\d+)\)").unwrap()
-});
+static PROC_START_51: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Start proc (\d+):([a-zA-Z0-9._:]+)/").unwrap());
+static PROC_START_LEGACY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Start proc ([a-zA-Z0-9._:]+) for .*: pid=(\d+)").unwrap());
+static PROC_KILL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Killing (\d+):([a-zA-Z0-9._:]+)/").unwrap());
+static PROC_DEATH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Process ([a-zA-Z0-9._:]+) \(pid (\d+)\) has died").unwrap());
+static PROC_LEAVE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^No longer want ([a-zA-Z0-9._:]+) \(pid (\d+)\)").unwrap());
 
 /// Possible lifecycle event detected in an ActivityManager log line.
 #[derive(Debug)]
@@ -474,5 +474,91 @@ mod tests {
         assert_eq!(truncate_to_boundary(s2, 1), "h"); // can't split é
         assert_eq!(truncate_to_boundary(s2, 2), "h");
         assert_eq!(truncate_to_boundary(s2, 3), "hé");
+    }
+
+    #[test]
+    fn test_parse_lifecycle_start_51() {
+        let event = parse_lifecycle(
+            "ActivityManager",
+            "Start proc 12345:com.example/u0a123 for activity com.example/.MainActivity",
+        )
+        .expect("should parse start event");
+        match event {
+            LifecycleEvent::Started { pid, package } => {
+                assert_eq!(pid, 12345);
+                assert_eq!(package, "com.example");
+            }
+            LifecycleEvent::Died { .. } => panic!("expected Started"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lifecycle_start_legacy() {
+        let event = parse_lifecycle(
+            "ActivityManager",
+            "Start proc com.example for activity com.example/.MainActivity: pid=12345 uid=10045 gids={}",
+        )
+        .expect("should parse legacy start event");
+        match event {
+            LifecycleEvent::Started { pid, package } => {
+                assert_eq!(pid, 12345);
+                assert_eq!(package, "com.example");
+            }
+            LifecycleEvent::Died { .. } => panic!("expected Started"),
+        }
+    }
+
+    #[test]
+    fn test_parse_lifecycle_kill() {
+        let event = parse_lifecycle(
+            "ActivityManager",
+            "Killing 12345:com.example/u0a123 (adj 0): stop com.example",
+        )
+        .expect("should parse kill event");
+        assert!(matches!(event, LifecycleEvent::Died { pid } if pid == 12345));
+    }
+
+    #[test]
+    fn test_parse_lifecycle_death() {
+        let event = parse_lifecycle(
+            "ActivityManager",
+            "Process com.example (pid 12345) has died",
+        )
+        .expect("should parse death event");
+        assert!(matches!(event, LifecycleEvent::Died { pid } if pid == 12345));
+    }
+
+    #[test]
+    fn test_parse_lifecycle_leave() {
+        let event = parse_lifecycle(
+            "ActivityManager",
+            "No longer want com.example (pid 12345): empty #17",
+        )
+        .expect("should parse leave event");
+        assert!(matches!(event, LifecycleEvent::Died { pid } if pid == 12345));
+    }
+
+    #[test]
+    fn test_parse_lifecycle_rejects_other_tags_and_messages() {
+        assert!(parse_lifecycle("MyApp", "Start proc 1:com.example/x").is_none());
+        assert!(parse_lifecycle("ActivityManager", "some unrelated message").is_none());
+    }
+
+    #[test]
+    fn test_parse_ps_line_normal() {
+        let line = "u0_a123       12345   789 12345678 123456 do_epoll_wait      0 S com.example";
+        let (pid, name) = parse_ps_line(line).expect("should parse ps line");
+        assert_eq!(pid, 12345);
+        assert_eq!(name, "com.example");
+    }
+
+    #[test]
+    fn test_parse_ps_line_rejects_header_and_garbage() {
+        assert!(
+            parse_ps_line("USER           PID  PPID     VSZ    RSS WCHAN            ADDR S NAME")
+                .is_none()
+        );
+        assert!(parse_ps_line("short line").is_none());
+        assert!(parse_ps_line("u0_a123 not-a-pid 789 1 1 w 0 S com.example").is_none());
     }
 }
