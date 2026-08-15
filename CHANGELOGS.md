@@ -7,6 +7,10 @@ All notable changes to tlog are documented in this file.
 ### Added
 - CI quality gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
   and `cargo test --all-targets` now run on every push and pull request.
+- UTF-8-safe cursor editing in the filter input: `Left`/`Right` move by character,
+  `Home`/`Up` jump to the start, `End`/`Down` jump to the end, and
+  insert/backspace/delete operate at the cursor; the input scrolls horizontally
+  on narrow terminals.
 - Unit tests for ActivityManager lifecycle parsing (all five event patterns) and
   `adb shell ps` line parsing.
 - Filter tests for explicit parentheses, negated groups, `package:mine`, and

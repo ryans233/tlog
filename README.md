@@ -62,6 +62,11 @@ tlog --lang zh
 | `Tab` | Switch focus to filter input |
 | `Esc` | Return to log view (when editing filter) |
 | `Enter` | Apply filter (when editing filter) |
+| `←` / `→` | Move the filter cursor by character (when editing filter) |
+| `Home` / `↑` | Jump to the start of the filter input |
+| `End` / `↓` | Jump to the end of the filter input |
+| `Backspace` / `Delete` | Delete before / at the cursor (when editing filter) |
+| `Ctrl+U` | Clear the filter input (when editing filter) |
 
 ### Settings screen (`o`)
 

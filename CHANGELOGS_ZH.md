@@ -7,6 +7,8 @@
 ### 新增
 - CI 质量门禁：每次 push 与 pull request 都会运行 `cargo fmt --check`、
   `cargo clippy --all-targets -- -D warnings` 与 `cargo test --all-targets`。
+- 过滤器输入新增 UTF-8 安全的游标编辑：`←`/`→` 逐字移动，`Home`/`↑` 跳到行首，
+  `End`/`↓` 跳到行尾，插入/退格/删除都在游标处执行；窄终端下输入框会横向滚动。
 - ActivityManager 生命周期解析（全部 5 种事件模式）与 `adb shell ps`
   行解析的单元测试。
 - 过滤器测试：显式括号、分组否定、`package:mine`、无效正则拒绝。
