@@ -2,6 +2,39 @@
 
 All notable changes to tlog are documented in this file.
 
+## [1.2.0] - 2026-08-15
+
+### Added
+- Device selection with `-s` / `--serial`; `ANDROID_SERIAL` is used as a
+  fallback, and `-s` inside a custom `--cmd` is extracted for the `adb shell ps`
+  seed command.
+- `-b` / `--buffer` for choosing logcat buffers and `-c` / `--clear` to flush
+  the device log before streaming.
+- `--exit-on-eof` exits when the logcat feed ends, and `--reconnect` restarts
+  the feed with exponential backoff (1s..30s). The default keeps the UI open in
+  `STOPPED` state without busy-polling the closed channel.
+- Status bar now shows how many entries were filtered out and how many incoming
+  messages were dropped due to channel backpressure.
+- Opt-in rejected log: `--debug` or `TLOG_DEBUG=1` writes unparsed lines and
+  reader diagnostics to `tlog-rejected.log` in the config directory, rotating
+  it at 1 MiB.
+
+### Changed
+- The startup `adb shell ps` seed now runs concurrently with logcat startup and
+  is bounded by a 3-second timeout; the PID map is merged when it completes.
+- Log lines are read with a 64 KiB retained-size cap; overlong lines are
+  discarded through the next newline so parsing stays aligned.
+- Scrollback insertion now flushes once per batch instead of once per line.
+- Paused input semantics are documented: logs arriving while paused are
+  discarded, not buffered.
+
+### Fixed
+- Logcat timestamps near the New Year now infer the previous/next year instead
+  of always using the current year.
+- `age:-5m` and `age:0m` are rejected instead of compiling into nonsensical
+  fixed windows.
+- The UI no longer spin-loops after the logcat receiver closes.
+
 ## [1.1.1] - 2026-08-15
 
 ### Added
