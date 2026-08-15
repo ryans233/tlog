@@ -2,6 +2,34 @@
 
 All notable changes to tlog are documented in this file.
 
+## [1.1.1] - 2026-08-15
+
+### Added
+- CI quality gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  and `cargo test --all-targets` now run on every push and pull request.
+- Unit tests for ActivityManager lifecycle parsing (all five event patterns) and
+  `adb shell ps` line parsing.
+- Filter tests for explicit parentheses, negated groups, `package:mine`, and
+  invalid regex rejection.
+
+### Fixed
+- Group negation semantics: `-(tag:foo | tag:bar)` now means
+  `NOT (foo OR bar)` and is evaluated as `-foo AND -bar`; it previously
+  compiled incorrectly and could match everything.
+- Explicit parentheses are preserved during filter compilation, so
+  `(a | b) c` no longer degrades to `a | (b & c)`.
+- Regex predicates are compiled once when the filter is applied instead of
+  recompiling `Regex` for every log entry during evaluation.
+- Invalid regex patterns now surface as a filter error immediately instead of
+  silently matching nothing.
+- `package:mine` is implemented as always-true (`-package:mine` always-false),
+  matching the README and Android Studio semantics.
+- All rustfmt and clippy warnings fixed.
+
+### Changed
+- Documented `age:` as a fixed window anchored at filter-compile time
+  (previously documented as a per-tick rolling window).
+
 ## [1.1.0] - 2026-08-01
 
 ### Added

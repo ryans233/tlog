@@ -2,6 +2,29 @@
 
 本文件记录了 tlog 的所有重要变更。
 
+## [1.1.1] - 2026-08-15
+
+### 新增
+- CI 质量门禁：每次 push 与 pull request 都会运行 `cargo fmt --check`、
+  `cargo clippy --all-targets -- -D warnings` 与 `cargo test --all-targets`。
+- ActivityManager 生命周期解析（全部 5 种事件模式）与 `adb shell ps`
+  行解析的单元测试。
+- 过滤器测试：显式括号、分组否定、`package:mine`、无效正则拒绝。
+
+### 修复
+- 分组否定语义：`-(tag:foo | tag:bar)` 现在表示 `NOT (foo OR bar)`，
+  按 `-foo AND -bar` 求值；此前编译错误，甚至可能匹配全部日志。
+- 过滤编译时保留显式括号，`(a | b) c` 不再退化为 `a | (b & c)`。
+- 正则谓词改为在应用过滤器时编译一次，不再对每条日志重复编译 `Regex`。
+- 无效正则现在立即作为过滤器错误显示，而不是静默地永不匹配。
+- 实现 `package:mine` 恒真（`-package:mine` 恒假），与 README 及
+  Android Studio 语义一致。
+- 修复全部 rustfmt 与 clippy 告警。
+
+### 变更
+- 文档明确 `age:` 为「过滤器编译时刻起算的固定窗口」（此前文档描述为
+  每 tick 刷新的滚动窗口）。
+
 ## [1.1.0] - 2026-08-01
 
 ### 新增
