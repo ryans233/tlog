@@ -4,6 +4,7 @@ mod config;
 mod filter;
 mod i18n;
 mod logcat;
+mod rejected;
 mod scrollback;
 mod ui;
 mod viewport;
@@ -13,10 +14,11 @@ use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::layout::{Position, Rect};
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -30,9 +32,26 @@ use viewport::ViewportTerminal;
 #[command(name = "tlog", version, about)]
 struct Cli {
     /// Override the logcat command (comma-separated args).
-    /// Default: adb,logcat,-v,threadtime
-    #[arg(long, value_delimiter = ',', default_values = ["adb", "logcat", "-v", "threadtime"])]
-    cmd: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    cmd: Option<Vec<String>>,
+    /// Target a device by serial number (passed as `adb -s <serial>`).
+    #[arg(long, short = 's', conflicts_with = "cmd")]
+    serial: Option<String>,
+    /// Log buffer(s) to pass to `adb logcat -b` (repeatable or comma-separated).
+    #[arg(long, short = 'b', value_delimiter = ',', conflicts_with = "cmd")]
+    buffer: Vec<String>,
+    /// Clear the device log before streaming (`adb logcat -c`).
+    #[arg(long, short = 'c', conflicts_with = "cmd")]
+    clear: bool,
+    /// Exit when the logcat feed ends instead of leaving the UI open.
+    #[arg(long, conflicts_with = "reconnect")]
+    exit_on_eof: bool,
+    /// Reconnect with exponential backoff when the logcat feed ends.
+    #[arg(long, conflicts_with = "exit_on_eof")]
+    reconnect: bool,
+    /// Write rejected lines and reader diagnostics to the config-dir rejected log.
+    #[arg(long)]
+    debug: bool,
     /// Pre-populate and apply a filter on startup.
     #[arg(long)]
     filter: Option<String>,
@@ -40,85 +59,253 @@ struct Cli {
     #[arg(long)]
     lang: Option<String>,
 }
-/// Run `adb shell ps` to seed the PID→package map.
-async fn seed_pid_map(map: &mut std::collections::HashMap<u32, String>, adb: &str) {
-    let result = tokio::process::Command::new(adb)
-        .args(["shell", "ps", "-A"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await;
 
-    let output = match result {
-        Ok(o) => o,
-        Err(_) => {
-            // Try without -A (older Android versions)
-            let result2 = tokio::process::Command::new(adb)
-                .args(["shell", "ps"])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
-                .await;
-            match result2 {
-                Ok(o) => o,
-                Err(_) => return,
+impl Cli {
+    /// Whether the rejected log is enabled via `--debug` or `TLOG_DEBUG`.
+    fn debug_enabled(&self) -> bool {
+        self.debug || env_flag_enabled("TLOG_DEBUG")
+    }
+
+    /// Resolve the device serial from `--serial`, a custom `--cmd`'s `-s`
+    /// argument, or `ANDROID_SERIAL`.
+    fn resolved_serial(&self) -> Option<String> {
+        if let Some(serial) = &self.serial {
+            return Some(serial.clone());
+        }
+        if let Some(cmd) = &self.cmd {
+            let mut args = cmd.iter();
+            while let Some(arg) = args.next() {
+                if arg == "-s" || arg == "--serial" {
+                    return args.next().cloned();
+                }
             }
         }
-    };
+        std::env::var("ANDROID_SERIAL")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Some((pid, name)) = parse_ps_line(line) {
-            map.insert(pid, name);
+    /// The logcat command passed to `Command::new`.
+    ///
+    /// `--cmd` is a full override; otherwise tlog builds
+    /// `adb [-s SERIAL] logcat [-b BUF]... -v threadtime`.
+    fn logcat_args(&self) -> Vec<String> {
+        if let Some(cmd) = &self.cmd {
+            return cmd.clone();
         }
+        let mut args = vec!["adb".to_string()];
+        if let Some(serial) = self.resolved_serial() {
+            args.push("-s".to_string());
+            args.push(serial);
+        }
+        args.push("logcat".to_string());
+        for buffer in &self.buffer {
+            args.push("-b".to_string());
+            args.push(buffer.clone());
+        }
+        args.extend(["-v".to_string(), "threadtime".to_string()]);
+        args
+    }
+
+    /// Command for clearing the device log, if `--clear` was requested.
+    fn clear_args(&self) -> Option<Vec<String>> {
+        if !self.clear || self.cmd.is_some() {
+            return None;
+        }
+        let mut args = vec!["adb".to_string()];
+        if let Some(serial) = self.resolved_serial() {
+            args.push("-s".to_string());
+            args.push(serial);
+        }
+        args.extend(["logcat".to_string(), "-c".to_string()]);
+        Some(args)
     }
 }
-/// Spawn the logcat reader task. Returns the subprocess handle and message receiver.
+
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "on" | "ON" | "yes" | "YES")
+    )
+}
+const SEED_TIMEOUT: Duration = Duration::from_secs(3);
+const CLEAR_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
+
+/// Run `adb shell ps` to seed the PID→package map.
 ///
-/// The reader task parses logcat stdout line by line and sends `Message::NewEntry`
-/// via the bounded channel. When the channel is full, messages are dropped.
-async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Receiver<Message>)> {
-    let (tx, rx) = mpsc::channel::<Message>(1024);
-
-    let mut command = Command::new(&cmd[0]);
-    if cmd.len() > 1 {
-        command.args(&cmd[1..]);
+/// Tries `ps -A` first, then falls back to `ps` for older Android versions.
+async fn seed_pid_map(map: &mut HashMap<u32, String>, adb: &str, serial: Option<&str>) {
+    let attempts: [&[&str]; 2] = [&["shell", "ps", "-A"], &["shell", "ps"]];
+    for args in attempts {
+        let mut command = Command::new(adb);
+        if let Some(serial) = serial {
+            command.arg("-s").arg(serial);
+        }
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let Ok(output) = command.output().await else {
+            continue;
+        };
+        let before = map.len();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some((pid, name)) = parse_ps_line(line) {
+                map.insert(pid, name);
+            }
+        }
+        if map.len() > before {
+            return;
+        }
+        // `ps -A` succeeded but yielded no parseable rows (e.g. an older
+        // Android format); fall through and try plain `ps`.
     }
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
-    command.kill_on_drop(true);
+}
 
-    let mut child = command.spawn()?;
-    let stdout = child.stdout.take().expect("stdout should be piped");
+/// Run a short adb command (used for `logcat -c`) and report success.
+async fn run_adb_command(args: &[String]) -> bool {
+    let mut command = Command::new(&args[0]);
+    if args.len() > 1 {
+        command.args(&args[1..]);
+    }
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    matches!(command.status().await, Ok(status) if status.success())
+}
 
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut buf: Vec<u8> = Vec::new();
-        let mut local_dropped: u64 = 0;
-        use std::io::Write;
-        let log_line = |msg: &str| {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("tlog-rejected.log")
-            {
-                let _ = writeln!(f, "[tlog] {}", msg);
+/// Read one line, bounding the retained buffer at `max` bytes.
+///
+/// If the line exceeds `max`, the remainder is discarded through the next
+/// newline so the stream stays aligned and memory use stays bounded.
+async fn read_until_limited<R>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    delim: u8,
+    max: usize,
+) -> std::io::Result<usize>
+where
+    R: AsyncBufRead + Unpin,
+{
+    buf.clear();
+    let mut limited = (&mut *reader).take(max as u64);
+    let n = limited.read_until(delim, buf).await?;
+    if n == 0 {
+        return Ok(0);
+    }
+    let truncated = n >= max && buf.last().is_none_or(|last| *last != delim);
+    if truncated {
+        discard_until(reader, delim).await?;
+    }
+    Ok(n)
+}
+
+/// Discard buffered input through the next `delim` (or EOF) without retaining it.
+async fn discard_until<R>(reader: &mut R, delim: u8) -> std::io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+{
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        if let Some(pos) = available.iter().position(|byte| *byte == delim) {
+            reader.consume(pos + 1);
+            return Ok(());
+        }
+        let len = available.len();
+        reader.consume(len);
+    }
+}
+
+struct LogcatFeed {
+    task: tokio::task::JoinHandle<()>,
+    rx: mpsc::Receiver<Message>,
+}
+
+/// Spawn the logcat reader task and return its message receiver.
+///
+/// The task owns the subprocess so it can restart it for `--reconnect`.
+/// Aborting the task kills the current child (`kill_on_drop`).
+fn spawn_logcat_feed(
+    cmd: &[String],
+    reconnect: bool,
+    rejected: rejected::RejectedLog,
+) -> LogcatFeed {
+    let (tx, rx) = mpsc::channel::<Message>(1024);
+    let cmd = cmd.to_vec();
+    let task = tokio::spawn(async move {
+        run_logcat_feed(cmd, reconnect, rejected, tx).await;
+    });
+    LogcatFeed { task, rx }
+}
+
+/// Own the logcat subprocess lifecycle: parse stdout, report status changes,
+/// and optionally reconnect with exponential backoff.
+async fn run_logcat_feed(
+    cmd: Vec<String>,
+    reconnect: bool,
+    rejected: rejected::RejectedLog,
+    tx: mpsc::Sender<Message>,
+) {
+    if cmd.is_empty() {
+        rejected.log("logcat reader: empty command");
+        let _ = tx.send(Message::LogcatDied).await;
+        return;
+    }
+    let mut local_dropped: u64 = 0;
+    let mut last_reported_dropped: u64 = 0;
+    let mut attempt: u32 = 0;
+
+    loop {
+        let mut command = Command::new(&cmd[0]);
+        if cmd.len() > 1 {
+            command.args(&cmd[1..]);
+        }
+        command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                rejected.log(&format!("logcat spawn failed: {}", err));
+                if tx.send(Message::LogcatDied).await.is_err() {
+                    return;
+                }
+                if !reconnect {
+                    return;
+                }
+                time::sleep(reconnect_delay(attempt)).await;
+                attempt = attempt.saturating_add(1);
+                continue;
             }
         };
-        let mut last_reported_dropped: u64 = 0;
+
+        if tx.send(Message::LogcatStarted).await.is_err() {
+            let _ = child.start_kill();
+            return;
+        }
+
+        let stdout = child.stdout.take().expect("stdout should be piped");
+        let mut reader = BufReader::new(stdout);
+        let mut buf: Vec<u8> = Vec::new();
 
         loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
+            match read_until_limited(&mut reader, &mut buf, b'\n', MAX_LOG_LINE_BYTES).await {
                 Ok(0) => {
-                    log_line("logcat reader: EOF (adb process exited)");
-                    let _ = tx.send(Message::LogcatDied).await;
+                    rejected.log("logcat reader: EOF (adb process exited)");
                     break;
                 }
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf);
                     let line = line.trim_end_matches(['\n', '\r']);
-                    // Try parsing as a log entry
                     if let Some(entry) = parse_line(line) {
                         // Check for ActivityManager lifecycle events
                         if entry.tag == "ActivityManager"
@@ -144,39 +331,38 @@ async fn start_logcat(cmd: &[String]) -> Result<(tokio::process::Child, mpsc::Re
                                 }
                             }
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                break;
+                                return;
                             }
                         }
                     } else {
-                        // Line didn't match expected format — append to rejected log.
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open("tlog-rejected.log")
-                        {
-                            if line.len() > 200 {
-                                let _ = writeln!(
-                                    f,
-                                    "[unparsed len={}] {}...",
-                                    line.len(),
-                                    &line[..200]
-                                );
-                            } else {
-                                let _ = writeln!(f, "{}", line);
-                            }
-                        }
+                        // Line didn't match expected format — append to the
+                        // opt-in rejected log.
+                        rejected.unparsed(line);
                     }
                 }
-                Err(e) => {
-                    log_line(&format!("logcat reader: read error: {}", e));
-                    let _ = tx.send(Message::LogcatDied).await;
+                Err(err) => {
+                    rejected.log(&format!("logcat reader: read error: {}", err));
                     break;
                 }
             }
         }
-    });
 
-    Ok((child, rx))
+        let _ = child.wait().await;
+        if tx.send(Message::LogcatDied).await.is_err() {
+            return;
+        }
+        if !reconnect {
+            return;
+        }
+        time::sleep(reconnect_delay(attempt)).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s.
+fn reconnect_delay(attempt: u32) -> Duration {
+    let shift = attempt.min(5);
+    Duration::from_secs(1u64 << shift).min(Duration::from_secs(30))
 }
 const VIEWPORT_HEIGHT: u16 = 3;
 const MAX_REPLAY: usize = 10_000;
@@ -201,11 +387,19 @@ async fn main() -> Result<()> {
     let lang = i18n::resolve(cli.lang.as_deref());
     let msgs = i18n::messages(lang);
 
+    let logcat_args = cli.logcat_args();
+    let logcat_bin = logcat_args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "adb".to_string());
+
     // Check that the logcat binary is available.
-    if which::which(&cli.cmd[0]).is_err() {
-        eprintln!("{}", msgs.adb_not_found_full(&cli.cmd[0]));
+    if which::which(&logcat_bin).is_err() {
+        eprintln!("{}", msgs.adb_not_found_full(&logcat_bin));
         std::process::exit(1);
     }
+
+    let rejected_log = rejected::RejectedLog::new(cli.debug_enabled());
 
     // ── Inline terminal init ──────────────────────────────────────────────
     crossterm::terminal::enable_raw_mode()?;
@@ -234,7 +428,7 @@ async fn main() -> Result<()> {
             term_cols,
             VIEWPORT_HEIGHT,
         ));
-        run_app(&mut terminal, cli, lang).await
+        run_app(&mut terminal, cli, lang, rejected_log).await
     } else {
         let cursor_pos = Position::new(cursor_col, cursor_row);
         let backend = ratatui::backend::CrosstermBackend::new(stdout);
@@ -246,7 +440,7 @@ async fn main() -> Result<()> {
             term_cols,
             VIEWPORT_HEIGHT,
         ));
-        run_app(&mut terminal, cli, lang).await
+        run_app(&mut terminal, cli, lang, rejected_log).await
     };
 
     // ── Cleanup ───────────────────────────────────────────────────────────
@@ -268,24 +462,51 @@ async fn run_app(
     terminal: &mut ViewportTerminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     cli: Cli,
     lang: i18n::Lang,
+    rejected_log: rejected::RejectedLog,
 ) -> Result<()> {
     let mut app = App::new(lang);
+    let logcat_args = cli.logcat_args();
+    let adb = logcat_args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "adb".to_string());
+    let serial = cli.resolved_serial();
 
-    // Seed PID→package map from `adb shell ps`
-    seed_pid_map(&mut app.pid_package_map, &cli.cmd[0]).await;
+    // Clear the device log before streaming. This is intentionally bounded so
+    // a stuck adb call cannot hang startup forever.
+    if let Some(clear_args) = cli.clear_args() {
+        let _ = time::timeout(CLEAR_TIMEOUT, run_adb_command(&clear_args)).await;
+    }
+
+    // Seed the PID→package map in the background with a timeout. The UI and
+    // logcat stream start immediately; the map is merged when the task lands.
+    let seed_adb = adb.clone();
+    let seed_serial = serial.clone();
+    let mut seed_task = tokio::spawn(async move {
+        let mut map = HashMap::new();
+        let _ = time::timeout(
+            SEED_TIMEOUT,
+            seed_pid_map(&mut map, &seed_adb, seed_serial.as_deref()),
+        )
+        .await;
+        map
+    });
+    let mut seed_done = false;
 
     // Apply startup filter if provided
-    if let Some(ref f) = cli.filter {
-        app.filter_input = f.clone();
+    if let Some(ref filter) = cli.filter {
+        app.filter_input = filter.clone();
         app.filter_move_end();
         app.apply_filter();
         // Replay all entries into scrollback (none yet, but init the viewport).
         replay_filtered(terminal, &app)?;
     }
 
-    let (child, mut msg_rx) = start_logcat(&cli.cmd).await?;
+    let feed = spawn_logcat_feed(&logcat_args, cli.reconnect, rejected_log);
+    let mut feed_task = Some(feed.task);
+    let mut msg_rx = feed.rx;
+    let mut feed_closed = false;
     app.running = true;
-    let mut child_handle = Some(child);
 
     let mut ticker = time::interval(Duration::from_millis(250));
     let mut event_stream = event::EventStream::new();
@@ -309,17 +530,32 @@ async fn run_app(
                     _ => {}
                 }
             }
-            msg = msg_rx.recv() => {
+            seed = &mut seed_task, if !seed_done => {
+                seed_done = true;
+                if let Ok(map) = seed {
+                    app.apply_seed_package_map(map);
+                }
+            }
+            msg = msg_rx.recv(), if !feed_closed => {
                 match msg {
                     Some(Message::NewEntry(entry)) => {
                         app.dispatch(Message::NewEntry(entry));
                     }
-                    Some(m) => {
-                        if !app.dispatch(m) {
+                    Some(message) => {
+                        let feed_died = matches!(message, Message::LogcatDied);
+                        let exit_on_eof = feed_died && cli.exit_on_eof;
+                        app.dispatch(message);
+                        if feed_died && !cli.reconnect {
+                            // Keep the UI open in STOPPED state without busy-polling
+                            // the closed channel.
+                            feed_closed = true;
+                        }
+                        if exit_on_eof {
                             break Ok(());
                         }
                     }
                     None => {
+                        feed_closed = true;
                         app.running = false;
                     }
                 }
@@ -331,6 +567,9 @@ async fn run_app(
         }
         // Handle filter change: clear scrollback and replay.
         if app.needs_replay {
+            // Replay covers every entry already in the buffer; pending lines
+            // would otherwise be inserted after the replay and duplicate them.
+            app.pending_log_lines.clear();
             terminal.clear_scrollback_and_visible_screen_ansi()?;
             // Recompute viewport position after clear.
             let size = terminal.size()?;
@@ -355,10 +594,9 @@ async fn run_app(
         terminal.draw(|f| ui::render_viewport(f, &app))?;
     };
 
-    // Cleanup
-    if let Some(mut child) = child_handle.take() {
-        child.start_kill().ok();
-        let _ = child.wait().await;
+    // Cleanup: abort the feed task so its `kill_on_drop` child is terminated.
+    if let Some(task) = feed_task.take() {
+        task.abort();
     }
 
     result
@@ -616,6 +854,122 @@ mod tests {
 
     fn code_key(code: KeyCode) -> event::KeyEvent {
         event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_cli_builds_serial_buffer_and_clear_args() {
+        let cli = Cli::try_parse_from([
+            "tlog",
+            "--serial",
+            "ABC123",
+            "--buffer",
+            "main,system",
+            "--clear",
+        ])
+        .expect("cli parses");
+        assert_eq!(
+            cli.logcat_args(),
+            [
+                "adb",
+                "-s",
+                "ABC123",
+                "logcat",
+                "-b",
+                "main",
+                "-b",
+                "system",
+                "-v",
+                "threadtime"
+            ]
+        );
+        assert_eq!(
+            cli.clear_args().expect("clear requested"),
+            ["adb", "-s", "ABC123", "logcat", "-c"]
+        );
+        assert_eq!(cli.resolved_serial().as_deref(), Some("ABC123"));
+    }
+
+    #[test]
+    fn test_cli_custom_cmd_extracts_serial_for_seed() {
+        let cli = Cli::try_parse_from(["tlog", "--cmd", "adb,-s,XYZ,logcat,-v,threadtime"])
+            .expect("cli parses");
+        assert_eq!(
+            cli.logcat_args(),
+            ["adb", "-s", "XYZ", "logcat", "-v", "threadtime"]
+        );
+        assert_eq!(cli.resolved_serial().as_deref(), Some("XYZ"));
+        assert_eq!(cli.clear_args(), None, "--clear conflicts with --cmd");
+    }
+
+    #[test]
+    fn test_cli_eof_options_conflict() {
+        assert!(Cli::try_parse_from(["tlog", "--exit-on-eof", "--reconnect"]).is_err());
+        assert!(Cli::try_parse_from(["tlog", "--reconnect"]).is_ok());
+        assert!(Cli::try_parse_from(["tlog", "--exit-on-eof"]).is_ok());
+    }
+
+    #[test]
+    fn test_reconnect_delay_backoff() {
+        assert_eq!(reconnect_delay(0), Duration::from_secs(1));
+        assert_eq!(reconnect_delay(1), Duration::from_secs(2));
+        assert_eq!(reconnect_delay(4), Duration::from_secs(16));
+        assert_eq!(reconnect_delay(5), Duration::from_secs(30));
+        assert_eq!(reconnect_delay(100), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn test_read_until_limited_reads_short_lines() {
+        let data = b"one\ntwo
+";
+        let mut reader = BufReader::new(&data[..]);
+        let mut buf = Vec::new();
+
+        assert_eq!(
+            read_until_limited(&mut reader, &mut buf, b'\n', 1024)
+                .await
+                .unwrap(),
+            4
+        );
+        assert_eq!(buf, b"one\n");
+        assert_eq!(
+            read_until_limited(&mut reader, &mut buf, b'\n', 1024)
+                .await
+                .unwrap(),
+            4
+        );
+        assert_eq!(buf, b"two\n");
+        assert_eq!(
+            read_until_limited(&mut reader, &mut buf, b'\n', 1024)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_until_limited_discards_overflow_and_stays_aligned() {
+        let mut data = vec![b'a'; MAX_LOG_LINE_BYTES + 5];
+        data.push(b'\n');
+        data.extend_from_slice(b"tail\n");
+        let mut reader = BufReader::new(data.as_slice());
+        let mut buf = Vec::new();
+
+        let n = read_until_limited(&mut reader, &mut buf, b'\n', MAX_LOG_LINE_BYTES)
+            .await
+            .expect("read should succeed");
+        assert_eq!(n, MAX_LOG_LINE_BYTES);
+        assert_eq!(buf.len(), MAX_LOG_LINE_BYTES);
+        assert!(buf.iter().all(|byte| *byte == b'a'));
+
+        // The stream stays aligned: the next line is the one after the
+        // discarded overflow.
+        assert_eq!(
+            read_until_limited(&mut reader, &mut buf, b'\n', 1024)
+                .await
+                .unwrap(),
+            5
+        );
+        assert_eq!(buf, b"tail\n");
     }
 
     #[test]
