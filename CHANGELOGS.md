@@ -2,6 +2,41 @@
 
 All notable changes to tlog are documented in this file.
 
+## [1.3.0] - 2026-08-16
+
+### Added
+- Search and highlight: `/` opens the search input, and a case-insensitive
+  literal query highlights matches in the displayed tag/package/message text of
+  the current filtered view (including newly arriving entries). Submitting an
+  empty query clears the highlight.
+- Quick level filters: `v` / `d` / `i` / `w` / `e` append `level:V/D/I/W/E`
+  with an explicit AND, so combined keys narrow to the strictest level.
+- Filter history: successfully applied filters are recorded and navigated with
+  `Up` / `Down`; the pre-navigation draft is restored after the newest entry.
+- Readline-style filter editing: `Ctrl+A` / `Ctrl+E` jump to start/end and
+  `Ctrl+W` deletes the previous whitespace-delimited word.
+- Saved named filters: `Ctrl+S` saves the current filter expression to
+  `<config-dir>/tlog/filters.conf`; `name:<saved>` inlines it during filter
+  compilation with negation support, nested references, and cycle/depth guards.
+- Export: `E` writes the current filtered view to a timestamped
+  `tlog-export-<timestamp>.log` in the working directory (canonical threadtime
+  format, no overwrite), and reports the result in the filter bar.
+- Offline playback: `tlog --file <log>` replays a log file through the same
+  parser/UI pipeline without requiring adb and exits automatically at EOF.
+- Resize debounce: terminal resize bursts are coalesced for 75 ms before the
+  scrollback is cleared and replayed.
+
+### Changed
+- `Up` / `Down` in the filter input now navigate applied-filter history;
+  `Home` / `End` (and the new `Ctrl+A` / `Ctrl+E`) cover start/end movement.
+- `name:` now resolves against saved filters and reports unknown/missing names
+  as a filter error instead of silently matching everything.
+- The help overlay lists the new search, export, and quick-level keys.
+
+### Fixed
+- The logcat and file readers now share one line-processing path, so offline
+  playback gets identical lifecycle parsing and backpressure behaviour.
+
 ## [1.2.0] - 2026-08-15
 
 ### Added
