@@ -65,6 +65,24 @@ pub struct Messages {
     pub invalid_age_value: &'static str,
     pub invalid_regex: &'static str,
     pub unknown_filter_key: &'static str,
+    pub unknown_named_filter: &'static str,
+    pub recursive_named_filter: &'static str,
+
+    // ── Search ──────────────────────────────────────────────────────────
+    pub search_status: &'static str, // "Search: {}"
+    pub search_hint: &'static str,
+
+    // ── Named filter editor ─────────────────────────────────────────────
+    pub filter_name_prompt: &'static str,
+    pub filter_name_hint: &'static str,
+    pub filter_name_invalid_name: &'static str,
+    pub filter_name_invalid_expr: &'static str,
+    pub filter_name_saved: &'static str, // "Saved filter '{}'"
+
+    // ── Export ──────────────────────────────────────────────────────────
+    pub export_saved: &'static str, // "Exported {} lines to {}"
+    pub export_empty: &'static str,
+    pub export_error_prefix: &'static str,
 
     // ── Help screen ─────────────────────────────────────────────────────
     pub help_title: &'static str,
@@ -76,6 +94,9 @@ pub struct Messages {
     pub help_bypass: &'static str,
     pub help_tab: &'static str,
     pub help_esc: &'static str,
+    pub help_search: &'static str,
+    pub help_export: &'static str,
+    pub help_quick_level: &'static str,
 
     // ── Options screen ──────────────────────────────────────────────────
     pub opts_timestamp: &'static str,
@@ -156,6 +177,32 @@ impl Messages {
     pub fn invalid_regex(&self, s: &str) -> String {
         self.invalid_regex.replacen("{}", s, 1)
     }
+
+    pub fn unknown_named_filter(&self, s: &str) -> String {
+        self.unknown_named_filter.replacen("{}", s, 1)
+    }
+
+    pub fn recursive_named_filter(&self, s: &str) -> String {
+        self.recursive_named_filter.replacen("{}", s, 1)
+    }
+
+    pub fn search_status(&self, s: &str) -> String {
+        self.search_status.replacen("{}", s, 1)
+    }
+
+    pub fn filter_name_saved(&self, s: &str) -> String {
+        self.filter_name_saved.replacen("{}", s, 1)
+    }
+
+    pub fn export_saved(&self, count: usize, path: &str) -> String {
+        self.export_saved
+            .replacen("{}", &count.to_string(), 1)
+            .replacen("{}", path, 1)
+    }
+
+    pub fn export_error(&self, s: &str) -> String {
+        self.export_error_prefix.replacen("{}", s, 1)
+    }
 }
 
 pub const EN: Messages = Messages {
@@ -183,6 +230,21 @@ pub const EN: Messages = Messages {
     invalid_age_value: "Invalid age value: '{}'",
     invalid_regex: "Invalid regex: {}",
     unknown_filter_key: "Unknown filter key",
+    unknown_named_filter: "Unknown saved filter: {}",
+    recursive_named_filter: "Recursive or too deeply nested saved filter: {}",
+
+    search_status: "Search: {}",
+    search_hint: "Type query | Enter to highlight | Esc to cancel",
+
+    filter_name_prompt: "save as: ",
+    filter_name_hint: "Enter save | Esc cancel",
+    filter_name_invalid_name: "Filter name cannot be empty or contain tabs/newlines",
+    filter_name_invalid_expr: "Filter expression is empty",
+    filter_name_saved: "Saved filter '{}'",
+
+    export_saved: "Exported {} lines to {}",
+    export_empty: "Nothing to export",
+    export_error_prefix: "Export failed: {}",
 
     help_title: "── Keybindings ───────────────────────────",
     help_quit: "Quit",
@@ -193,6 +255,9 @@ pub const EN: Messages = Messages {
     help_bypass: "Toggle filter bypass",
     help_tab: "Switch focus to filter",
     help_esc: "Cancel filter / return",
+    help_search: "Search and highlight",
+    help_export: "Export filtered view",
+    help_quick_level: "Quick level filter",
 
     opts_timestamp: "Timestamp",
     opts_pid: "PID",
@@ -252,6 +317,21 @@ pub const ZH: Messages = Messages {
     invalid_age_value: "无效的 age 值: '{}'",
     invalid_regex: "无效的正则表达式: {}",
     unknown_filter_key: "未知过滤器键",
+    unknown_named_filter: "未知的已保存过滤器: {}",
+    recursive_named_filter: "已保存过滤器递归过深或存在循环: {}",
+
+    search_status: "搜索: {}",
+    search_hint: "输入关键字 | Enter 高亮 | Esc 取消",
+
+    filter_name_prompt: "另存为: ",
+    filter_name_hint: "Enter 保存 | Esc 取消",
+    filter_name_invalid_name: "过滤器名称不能为空，且不能包含制表符或换行",
+    filter_name_invalid_expr: "过滤器表达式为空",
+    filter_name_saved: "已保存过滤器 '{}'",
+
+    export_saved: "已导出 {} 条到 {}",
+    export_empty: "没有可导出的日志",
+    export_error_prefix: "导出失败: {}",
 
     help_title: "── 快捷键 ──────────────────────────────",
     help_quit: "退出程序",
@@ -262,6 +342,9 @@ pub const ZH: Messages = Messages {
     help_bypass: "临时禁用/恢复过滤器",
     help_tab: "切换焦点到过滤器",
     help_esc: "取消过滤/返回",
+    help_search: "搜索并高亮匹配",
+    help_export: "导出当前过滤视图",
+    help_quick_level: "快速等级过滤",
 
     opts_timestamp: "时间戳",
     opts_pid: "PID",
