@@ -197,11 +197,14 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
         f.set_cursor_position((rel_cx, rel_cy));
     }
 
-    // Filter error / one-shot notice / input-mode hint below the input line.
-    if filter_area.height > 1 {
+    // Filter error / one-shot notice / input-mode hint on the second inner
+    // row. The block's top border consumes one row, so the notice row is
+    // `inner.y + 1`, never `inner.y + inner.height` (that is outside the
+    // viewport and silently renders nothing).
+    if inner.height > 1 {
         let notice_area = Rect {
             x: filter_area.x + 1,
-            y: inner.y + inner.height,
+            y: inner.y + 1,
             width: filter_area.width.saturating_sub(2),
             height: 1,
         };
@@ -714,6 +717,27 @@ mod tests {
         let lines = settings_lines(&app);
         assert_eq!(lines.len(), 13);
         assert!(line_text(&lines[1]).contains(app.msgs.settings_category_color));
+    }
+
+    #[test]
+    fn test_status_message_renders_on_second_inner_row() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.status_message = Some("Exported 42 lines to tlog-export.log".to_string());
+        let area = Rect::new(0, 0, 48, 3);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        {
+            let mut frame = ViewportFrame {
+                cursor_position: None,
+                viewport_area: area,
+                buffer: &mut buffer,
+            };
+            render_viewport(&mut frame, &app);
+        }
+        let row: String = (0..area.width).map(|x| buffer[(x, 2)].symbol()).collect();
+        assert!(
+            row.contains("Exported 42 lines"),
+            "notice must be visible inside the 3-row viewport: {row:?}"
+        );
     }
 
     #[test]
