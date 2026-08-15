@@ -42,8 +42,8 @@ pub struct Messages {
     pub adb_not_found_url: &'static str,
 
     // ── Status bar ──────────────────────────────────────────────────────
-    pub status_bar: &'static str,          // "共{}条 | 显示{}条 | {}"
-    pub filter_title: &'static str,        // " 过滤器 ({}) "
+    pub status_bar: &'static str, // "共{}条 | 显示{}条 | 过滤掉{}条 | 丢弃{}条 | {}"
+    pub filter_title: &'static str, // " 过滤器 ({}) "
     pub filter_error_prefix: &'static str, // "错误: {}"
 
     // ── Run-state indicator ─────────────────────────────────────────────
@@ -121,10 +121,19 @@ impl Messages {
         )
     }
 
-    pub fn status_bar(&self, total: usize, shown: usize, filter: &str) -> String {
+    pub fn status_bar(
+        &self,
+        total: usize,
+        shown: usize,
+        filtered_out: usize,
+        dropped: u64,
+        filter: &str,
+    ) -> String {
         self.status_bar
             .replacen("{}", &total.to_string(), 1)
             .replacen("{}", &shown.to_string(), 1)
+            .replacen("{}", &filtered_out.to_string(), 1)
+            .replacen("{}", &dropped.to_string(), 1)
             .replacen("{}", filter, 1)
     }
 
@@ -154,7 +163,7 @@ pub const EN: Messages = Messages {
     adb_not_found_hint: "' command not found.\nPlease install Android SDK command-line tools:",
     adb_not_found_url: "https://developer.android.com/tools",
 
-    status_bar: "{} total | {} shown | {}",
+    status_bar: "{} total | {} shown | {} filtered out | {} dropped | {}",
     filter_title: " Filter ({}) ",
     filter_error_prefix: "Error: {}",
 
@@ -223,7 +232,7 @@ pub const ZH: Messages = Messages {
     adb_not_found_hint: "' 命令。\n请先安装 Android SDK 命令行工具:",
     adb_not_found_url: "https://developer.android.com/tools?hl=zh-cn",
 
-    status_bar: "共{}条 | 显示{}条 | {}",
+    status_bar: "共{}条 | 显示{}条 | 过滤掉{}条 | 丢弃{}条 | {}",
     filter_title: " 过滤器 ({}) ",
     filter_error_prefix: "错误: {}",
 
@@ -302,5 +311,21 @@ pub fn messages(lang: Lang) -> &'static Messages {
     match lang {
         Lang::En => &EN,
         Lang::Zh => &ZH,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_bar_includes_drop_and_filter_stats() {
+        let en = EN.status_bar(100, 42, 58, 7, "Filter OK");
+        assert_eq!(
+            en,
+            "100 total | 42 shown | 58 filtered out | 7 dropped | Filter OK"
+        );
+        let zh = ZH.status_bar(100, 42, 58, 7, "过滤 OK");
+        assert_eq!(zh, "共100条 | 显示42条 | 过滤掉58条 | 丢弃7条 | 过滤 OK");
     }
 }

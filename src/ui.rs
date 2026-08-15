@@ -138,6 +138,8 @@ pub fn render_viewport(f: &mut ViewportFrame, app: &App) {
     let status = msgs.status_bar(
         app.buffer.len(),
         app.buffer.filtered_len(),
+        app.buffer.total_filtered_out as usize,
+        app.dropped_messages,
         filter_status(app, msgs),
     );
 
