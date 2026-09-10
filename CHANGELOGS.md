@@ -2,6 +2,35 @@
 
 All notable changes to tlog are documented in this file.
 
+## [1.4.2] - 2026-09-10
+
+### Added
+- Release CI now fails when a tag does not match the `Cargo.toml` version, so a
+  published binary can no longer report a `--version` that disagrees with the
+  release name.
+
+### Fixed
+- `--debug`/`TLOG_DEBUG` no longer panics the reader task when an unparsed line
+  longer than 200 bytes contains a multi-byte character straddling the cut:
+  truncation now stops on a UTF-8 char boundary.
+- Exiting now leaves bracketed-paste mode, so the first paste after quitting no
+  longer leaks `ESC[200~` markers into the shell.
+- Release checksums are no longer overwritten by the build matrix: each platform
+  uploads `SHA256SUMS.<target>` and the release job publishes one aggregated
+  `SHA256SUMS` next to them.
+- One-shot notices (export/save results) disappear after 5 seconds instead of
+  staying on the status line until the next search or save prompt.
+- `process:` is documented as an alias of `package:` (same matched field, PID
+  fallback while unresolved); it was missing from the README key lists.
+
+### Performance
+- Scrollback insertion renders the whole batch into one byte buffer and writes
+  it once. `stdout` is line-buffered, so the previous per-line `\r\n` writes
+  flushed once per log line during replays.
+- `LogBuffer::push` evaluates the filter once and returns the entry's position
+  in the filtered view, so lines are formatted from the buffered entry instead
+  of re-evaluating the predicate and cloning the entry.
+
 ## [1.4.1] - 2026-08-16
 
 ### Fixed

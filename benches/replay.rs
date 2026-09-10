@@ -67,7 +67,7 @@ fn make_entry(i: u32) -> LogEntry {
 fn fill_buffer(len: usize) -> LogBuffer {
     let mut buffer = LogBuffer::new();
     for i in 0..len {
-        buffer.push(make_entry(i as u32), None);
+        let _ = buffer.push(make_entry(i as u32), None);
     }
     buffer
 }

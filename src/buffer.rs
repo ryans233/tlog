@@ -36,10 +36,13 @@ impl LogBuffer {
 
     /// Push a new entry. If the buffer is full, evict the oldest batch first.
     ///
-    /// If `filter` is `Some`, the entry is tested against it; if it passes,
-    /// the entry's index is appended to `filtered`.
+    /// If `filter` is `Some`, the entry is tested against it exactly once; if
+    /// it passes, the entry's position in the filtered view is returned.
     /// If `filter` is `None`, all entries pass.
-    pub fn push(&mut self, entry: LogEntry, filter: Option<&Expr>) {
+    ///
+    /// The returned position lets callers format the stored entry through
+    /// [`Self::get_filtered`] instead of cloning it before the push.
+    pub fn push(&mut self, entry: LogEntry, filter: Option<&Expr>) -> Option<usize> {
         self.total_parsed += 1;
 
         // Evict if full
@@ -65,6 +68,9 @@ impl LogBuffer {
 
         if passes {
             self.filtered.push(idx);
+            Some(self.filtered.len() - 1)
+        } else {
+            None
         }
     }
 
@@ -156,8 +162,8 @@ mod tests {
     #[test]
     fn test_push_and_get() {
         let mut buf = LogBuffer::new();
-        buf.push(make_entry("A", "one"), None);
-        buf.push(make_entry("B", "two"), None);
+        assert_eq!(buf.push(make_entry("A", "one"), None), Some(0));
+        assert_eq!(buf.push(make_entry("B", "two"), None), Some(1));
         assert_eq!(buf.len(), 2);
         assert_eq!(buf.filtered_len(), 2);
         assert_eq!(buf.get_filtered(0).unwrap().1.tag, "A");
@@ -165,11 +171,29 @@ mod tests {
     }
 
     #[test]
+    fn test_push_returns_position_in_filtered_view() {
+        let mut buf = LogBuffer::new();
+        let filter = crate::filter::compile("tag:Keep", &crate::i18n::EN).expect("filter compiles");
+
+        // A filtered-out entry returns `None` and is not addressable.
+        assert_eq!(buf.push(make_entry("Drop", "one"), Some(&filter)), None);
+        // A passing entry returns the position `get_filtered` resolves to the
+        // same entry, so callers can format the stored copy without cloning.
+        let pos = buf
+            .push(make_entry("Keep", "two"), Some(&filter))
+            .expect("passes");
+        assert_eq!(pos, 0);
+        assert_eq!(buf.get_filtered(pos).unwrap().1.message, "two");
+        assert_eq!(buf.filtered_len(), 1);
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
     fn test_eviction() {
         let mut buf = LogBuffer::new();
         // Fill beyond RING_CAP
         for i in 0..(RING_CAP + EVICT_BATCH + 10) {
-            buf.push(make_entry("T", &format!("msg{}", i)), None);
+            let _ = buf.push(make_entry("T", &format!("msg{}", i)), None);
         }
         // Should have evicted the first EVICT_BATCH, then some more
         assert!(buf.len() <= RING_CAP);
@@ -187,8 +211,8 @@ mod tests {
         with_package.package = Some("keep.me".to_string());
         let mut missing = make_entry("B", "two");
         missing.pid = 42;
-        buf.push(with_package, None);
-        buf.push(missing, None);
+        let _ = buf.push(with_package, None);
+        let _ = buf.push(missing, None);
 
         let map = HashMap::from([(42u32, "com.example".to_string())]);
         buf.resolve_packages(&map);
@@ -205,8 +229,8 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut buf = LogBuffer::new();
-        buf.push(make_entry("A", "one"), None);
-        buf.push(make_entry("B", "two"), None);
+        let _ = buf.push(make_entry("A", "one"), None);
+        let _ = buf.push(make_entry("B", "two"), None);
         buf.clear();
         assert_eq!(buf.len(), 0);
         assert_eq!(buf.filtered_len(), 0);

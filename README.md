@@ -12,7 +12,7 @@ A terminal-based Android logcat viewer written in Rust.
 ## Features
 
 - **Real-time log stream** — reads and parses `adb logcat -v threadtime` output
-- **Android Studio-style filter** — supports `tag:`, `level:`, `package:`, `message:`, `age:`, `is:` key-value filters with regex, negation, and boolean operators
+- **Android Studio-style filter** — supports `tag:`, `level:`, `package:`, `process:`, `message:`, `age:`, `is:` key-value filters with regex, negation, and boolean operators
 - **Package name resolution** — auto-resolves PID to package name from ActivityManager lifecycle events (inspired by pidcat)
 - **Color highlighting** — color-coded by log level (V=gray D=cyan I=green W=yellow E=red F=red-bg), fully customizable in Settings
 - **Display options** — set which fields show (timestamp, PID, TID, tag, level, color) in Settings (`o`)
@@ -197,8 +197,9 @@ age:5m                   # Last 5 minutes (window fixed at filter compile time)
 age:1h                   # Last 1 hour (window fixed at filter compile time)
 is:crash                 # FATAL EXCEPTION
 is:stacktrace            # Stack trace continuation lines
-package:com.example      # Package name filter (requires resolved PID)
+package:com.example      # Resolved package name (falls back to the PID as a string)
 package:mine             # Always true (no project context)
+process:com.example      # Alias of package: — matches the same field
 name:errors              # Saved filter (created with Ctrl+S; quote names with `-`)
 ```
 

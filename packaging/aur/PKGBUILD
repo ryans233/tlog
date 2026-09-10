@@ -1,6 +1,6 @@
 # Maintainer: replace with your AUR maintainer info
 pkgname=tlog-bin
-pkgver=1.4.1
+pkgver=1.4.2
 pkgrel=1
 pkgdesc="Android Logcat TUI viewer with inline terminal scrollback"
 arch=('x86_64')

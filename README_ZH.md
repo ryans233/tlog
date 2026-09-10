@@ -12,7 +12,7 @@
 ## 功能
 
 - **实时日志流** — 通过 `adb logcat -v threadtime` 读取并解析日志
-- **Android Studio 风格过滤器** — 支持 `tag:`、`level:`、`package:`、`message:`、`age:`、`is:` 等键值过滤，支持正则、否定和布尔运算
+- **Android Studio 风格过滤器** — 支持 `tag:`、`level:`、`package:`、`process:`、`message:`、`age:`、`is:` 等键值过滤，支持正则、否定和布尔运算
 - **包名解析** — 自动从 ActivityManager 生命周期事件解析 PID→包名映射（参考 pidcat）
 - **颜色高亮** — 按日志等级着色（V=灰 D=青 I=绿 W=黄 E=红 F=红底），可在设置中完全自定义
 - **显示选项** — 在设置界面（`o`）中开关时间戳、PID、TID、Tag、等级、颜色的显示
@@ -196,8 +196,9 @@ age:5m                   # 最近 5 分钟（窗口固定于过滤器编译时�
 age:1h                   # 最近 1 小时（窗口固定于过滤器编译时刻）
 is:crash                 # FATAL EXCEPTION
 is:stacktrace            # 堆栈延续行
-package:com.example      # 包名过滤（需先解析到）
+package:com.example      # 包名过滤（未解析到时回退匹配 PID 字符串）
 package:mine             # 恒真（无项目上下文）
+process:com.example      # package: 的别名，匹配同一字段
 name:errors              # 命名过滤器（Ctrl+S 创建；名称含 - 时请加引号）
 ```
 

@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 /// Maximum size of the rejected-log file before it is rotated.
 const MAX_REJECTED_LOG_BYTES: u64 = 1024 * 1024;
 
+/// Maximum bytes of a single unparsed line kept in the rejected log.
+///
+/// Truncation happens on a UTF-8 char boundary, so a multi-byte character
+/// straddling the limit can never panic the reader task.
+const MAX_UNPARSED_BYTES: usize = 200;
+
 /// Optional debug log for unparsed lines and reader diagnostics.
 ///
 /// Disabled by default. When enabled (`--debug` or `TLOG_DEBUG`), the file is
@@ -35,13 +41,14 @@ impl RejectedLog {
         self.append(&format!("[tlog] {}", msg));
     }
 
-    /// Append a rejected line, truncating long lines to 200 characters.
+    /// Append a rejected line, truncating long lines to
+    /// [`MAX_UNPARSED_BYTES`] bytes on a UTF-8 char boundary.
     pub fn unparsed(&self, line: &str) {
-        if line.len() > 200 {
+        if line.len() > MAX_UNPARSED_BYTES {
             self.append(&format!(
                 "[unparsed len={}] {}...",
                 line.len(),
-                &line[..200]
+                crate::logcat::truncate_to_boundary(line, MAX_UNPARSED_BYTES)
             ));
         } else {
             self.append(line);
@@ -118,6 +125,25 @@ mod tests {
         log.unparsed("short");
         let text = std::fs::read_to_string(&path).expect("log written");
         assert!(text.contains("short\n"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_unparsed_truncates_multibyte_on_char_boundary() {
+        let path = temp_path("truncate-multibyte");
+        let _ = std::fs::remove_file(&path);
+        let log = RejectedLog {
+            enabled: true,
+            path: Some(path.clone()),
+        };
+        // 100 three-byte characters: byte 200 falls inside a character, so a
+        // raw byte slice would panic the reader task here.
+        let long = "中".repeat(100);
+        log.unparsed(&long);
+        let text = std::fs::read_to_string(&path).expect("log written");
+        assert!(text.starts_with("[unparsed len=300] "), "{text:?}");
+        assert!(text.ends_with("...\n"), "{text:?}");
+        assert_eq!(text.matches('中').count(), 66, "{text:?}");
         let _ = std::fs::remove_file(&path);
     }
 

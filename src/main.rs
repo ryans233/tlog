@@ -478,12 +478,14 @@ fn next_replay_chunk_end(next: usize, end: usize) -> usize {
     next.saturating_add(REPLAY_CHUNK).min(end)
 }
 
-/// Restore the terminal after tlog exits: reset styles, clear the visible
-/// screen and the scrollback the session filled, and park the cursor on the
-/// bottom row so the shell prompt lands in a clean terminal.
+/// Restore the terminal after tlog exits: leave bracketed-paste mode, reset
+/// styles, clear the visible screen and the scrollback the session filled, and
+/// park the cursor on the bottom row so the shell prompt lands in a clean
+/// terminal.
 fn restore_terminal<W: std::io::Write>(w: &mut W, term_rows: u16) -> std::io::Result<()> {
     crossterm::execute!(
         w,
+        crossterm::event::DisableBracketedPaste,
         crossterm::style::ResetColor,
         crossterm::cursor::MoveTo(0, term_rows.saturating_sub(1)),
         crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -1640,9 +1642,10 @@ mod tests {
         restore_terminal(&mut out, 24).expect("restore should succeed");
         let bytes = String::from_utf8(out).expect("ansi bytes");
         assert!(
-            bytes.starts_with("\x1b[0m"),
-            "resets colors first: {bytes:?}"
+            bytes.starts_with("\x1b[?2004l"),
+            "leaves bracketed-paste mode first: {bytes:?}"
         );
+        assert!(bytes.contains("\x1b[0m"), "resets colors: {bytes:?}");
         assert!(
             bytes.contains("\x1b[24;1H"),
             "cursor parked on bottom row: {bytes:?}"

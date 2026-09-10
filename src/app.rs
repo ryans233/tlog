@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
@@ -8,6 +9,9 @@ use crate::logcat::Message;
 
 /// Maximum number of applied filter expressions kept for Up/Down history.
 const MAX_FILTER_HISTORY: usize = 100;
+
+/// How long a one-shot status notice (export/save result) stays visible.
+const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 
 /// Controls which fields are shown in the log display.
 #[derive(Clone, Debug, PartialEq)]
@@ -98,7 +102,12 @@ pub struct App {
     /// Filter expression being saved by the save-filter-as mode.
     pub name_target: String,
     /// One-shot notice shown below the filter bar (export/save results).
+    ///
+    /// Cleared when [`Self::expire_status_message`] passes
+    /// `status_message_deadline`, or by the input modes that replace it.
     pub status_message: Option<String>,
+    /// When `status_message` stops being shown.
+    pub status_message_deadline: Option<Instant>,
     pub status_is_error: bool,
     pub active_filter: Option<Expr>,
     pub filter_error: Option<String>,
@@ -162,6 +171,7 @@ impl App {
             name_cursor: 0,
             name_target: String::new(),
             status_message: None,
+            status_message_deadline: None,
             status_is_error: false,
             active_filter: None,
             filter_error: None,
@@ -216,11 +226,14 @@ impl App {
                     } else {
                         self.active_filter.as_ref()
                     };
-                    self.buffer.push(entry.clone(), eff_filter);
-                    // Only format and queue for scrollback if the entry passes the filter.
-                    if eff_filter.is_none_or(|f| f.evaluate(&entry)) {
+                    // `push` evaluates the filter once and returns the entry's
+                    // position in the filtered view, so the line is formatted
+                    // from the buffered entry instead of a clone.
+                    if let Some(pos) = self.buffer.push(entry, eff_filter)
+                        && let Some((_, entry)) = self.buffer.get_filtered(pos)
+                    {
                         let line = crate::ui::format_entry(
-                            &entry,
+                            entry,
                             &self.config,
                             &self.palette,
                             self.search_regex.as_ref(),
@@ -245,7 +258,9 @@ impl App {
                 self.running = true;
             }
             Message::Tick => {
-                // Tick is only used for frame rendering; no filter refresh needed.
+                // Tick drives frame rendering and expires one-shot notices.
+                // Filter cutoffs are deliberately not refreshed (see `age:`).
+                self.expire_status_message(Instant::now());
             }
         }
         true
@@ -414,6 +429,7 @@ impl App {
         let closing_help = self.show_help;
         self.show_help = false;
         self.status_message = None;
+        self.status_message_deadline = None;
         self.status_is_error = false;
         // Closing the help overlay changes the viewport height; re-home the
         // bottom bar before the search query is applied. When help was already
@@ -483,6 +499,7 @@ impl App {
         self.name_input.clear();
         self.name_cursor = 0;
         self.status_message = None;
+        self.status_message_deadline = None;
         self.status_is_error = false;
         self.focus = Focus::FilterName;
     }
@@ -590,6 +607,20 @@ impl App {
     fn set_status(&mut self, message: String, is_error: bool) {
         self.status_message = Some(message);
         self.status_is_error = is_error;
+        self.status_message_deadline = Some(Instant::now() + STATUS_MESSAGE_TTL);
+    }
+
+    /// Clear the one-shot status notice once its TTL has elapsed.
+    ///
+    /// Takes `now` explicitly so the behaviour is testable without sleeping.
+    pub fn expire_status_message(&mut self, now: Instant) {
+        if let Some(deadline) = self.status_message_deadline
+            && now >= deadline
+        {
+            self.status_message = None;
+            self.status_message_deadline = None;
+            self.status_is_error = false;
+        }
     }
 
     /// Toggle filter bypass (g key). Keeps filter_input intact.
@@ -960,5 +991,79 @@ mod tests {
             Some(app.msgs.filter_name_invalid_expr)
         );
         assert!(app.named_filters.is_empty());
+    }
+
+    #[test]
+    fn test_status_message_expires_after_ttl() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.set_status("exported".to_string(), false);
+        assert_eq!(app.status_message.as_deref(), Some("exported"));
+
+        // Not due yet: the notice stays visible.
+        app.expire_status_message(Instant::now());
+        assert!(app.status_message.is_some());
+
+        app.expire_status_message(Instant::now() + STATUS_MESSAGE_TTL + Duration::from_millis(1));
+        assert!(app.status_message.is_none());
+        assert!(app.status_message_deadline.is_none());
+        assert!(!app.status_is_error);
+    }
+
+    #[test]
+    fn test_tick_expires_overdue_status_message() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.set_status("saved".to_string(), false);
+        // Force the deadline into the past so the wiring is checked without
+        // sleeping for the real TTL.
+        app.status_message_deadline = Some(Instant::now() - Duration::from_secs(1));
+        app.dispatch(Message::Tick);
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn test_dispatch_buffers_and_queues_only_matching_entries() {
+        use crate::logcat::{LogEntry, LogLevel};
+
+        fn entry(tag: &str, message: &str) -> LogEntry {
+            LogEntry {
+                timestamp: chrono::NaiveDateTime::parse_from_str(
+                    "2024-07-27 10:15:30.123",
+                    "%Y-%m-%d %H:%M:%S%.3f",
+                )
+                .expect("fixed timestamp"),
+                pid: 1234,
+                tid: 5678,
+                level: LogLevel::Info,
+                tag: tag.to_string(),
+                message: message.to_string(),
+                package: None,
+            }
+        }
+
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+        app.filter_input = "tag:Keep".to_string();
+        app.apply_filter();
+
+        app.dispatch(Message::NewEntry(entry("Keep", "one")));
+        app.dispatch(Message::NewEntry(entry("Drop", "two")));
+
+        assert_eq!(app.buffer.len(), 2);
+        assert_eq!(app.buffer.filtered_len(), 1);
+        // Only the matching entry reaches scrollback, and it is rendered from
+        // the entry stored in the buffer.
+        assert_eq!(app.pending_log_lines.len(), 1);
+        let rendered: String = app.pending_log_lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(rendered.contains("one"), "{rendered}");
+        assert!(!rendered.contains("two"), "{rendered}");
+
+        // Paused entries are discarded, not buffered or queued.
+        app.paused = true;
+        app.dispatch(Message::NewEntry(entry("Keep", "three")));
+        assert_eq!(app.buffer.len(), 2);
+        assert_eq!(app.pending_log_lines.len(), 1);
     }
 }

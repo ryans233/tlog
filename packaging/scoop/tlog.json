@@ -1,11 +1,11 @@
 {
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Android Logcat TUI viewer with inline terminal scrollback",
   "homepage": "https://github.com/ryans233/tlog",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/ryans233/tlog/releases/download/v1.4.1/tlog-x86_64-pc-windows-msvc.zip",
+      "url": "https://github.com/ryans233/tlog/releases/download/v1.4.2/tlog-x86_64-pc-windows-msvc.zip",
       "hash": "sha256:REPLACE_WITH_WINDOWS_X86_64_SHA256"
     }
   },

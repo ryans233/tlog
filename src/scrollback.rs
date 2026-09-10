@@ -51,7 +51,51 @@ impl Command for ResetScrollRegion {
 
 // ── insert_log_lines ─────────────────────────────────────────────────────────
 
+/// Build the ANSI byte stream that inserts `lines` above the viewport.
+///
+/// `viewport_top` is the first row of the viewport. `0` means the viewport is
+/// at the top of the screen: there is no room to scroll, so the lines
+/// overwrite the top rows instead.
+///
+/// Kept separate from [`insert_log_lines`] so the emitted sequence can be
+/// asserted in tests without a real terminal.
+fn insert_batch_ansi(viewport_top: u16, lines: &[Line<'_>]) -> io::Result<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+
+    if viewport_top == 0 {
+        // Viewport at top — nowhere to insert above.
+        for (i, line) in lines.iter().enumerate() {
+            crossterm::execute!(out, crossterm::cursor::MoveTo(0, i as u16))?;
+            write_spans(&mut out, &line.spans)?;
+        }
+        return Ok(out);
+    }
+
+    // Set scroll region to everything above the viewport.
+    // This ensures \n at the boundary scrolls only the log area, not the viewport.
+    crossterm::execute!(out, SetScrollRegion(0..viewport_top))?;
+
+    // Move cursor just above the viewport (last row of scroll region).
+    let write_row = viewport_top.saturating_sub(1);
+    crossterm::execute!(out, crossterm::cursor::MoveTo(0, write_row))?;
+
+    for line in lines {
+        // \r\n at the bottom of the scroll region scrolls the region up by 1,
+        // leaving the cursor at the same row (now blank).
+        out.extend_from_slice(b"\r\n");
+        write_spans(&mut out, &line.spans)?;
+    }
+
+    crossterm::execute!(out, ResetScrollRegion)?;
+
+    Ok(out)
+}
+
 /// Write styled log lines above the viewport into the terminal's scrollback.
+///
+/// The batch is rendered into one byte buffer and written with a single
+/// `write_all`: the backend wraps a line-buffered `Stdout`, so writing row by
+/// row would flush once per line (one syscall per log line) during replays.
 ///
 /// After this call, the viewport may have moved if there was room below it.
 pub fn insert_log_lines<B>(terminal: &mut ViewportTerminal<B>, lines: &[Line<'_>]) -> io::Result<()>
@@ -63,43 +107,11 @@ where
         return Ok(());
     }
 
-    let viewport_top = terminal.viewport_area.top();
+    let batch = insert_batch_ansi(terminal.viewport_area.top(), lines)?;
 
-    if viewport_top == 0 {
-        // Viewport at top — nowhere to insert above.
-        let backend = terminal.backend_mut();
-        for (i, line) in lines.iter().enumerate() {
-            crossterm::execute!(backend, crossterm::cursor::MoveTo(0, i as u16))?;
-            write_spans(backend, &line.spans)?;
-        }
-        io::Write::flush(backend)?;
-        return Ok(());
-    }
-
-    {
-        let backend = terminal.backend_mut();
-
-        // Set scroll region to everything above the viewport.
-        // This ensures \n at the boundary scrolls only the log area, not the viewport.
-        crossterm::execute!(backend, SetScrollRegion(0..viewport_top),)?;
-
-        // Move cursor just above the viewport (last row of scroll region).
-        let write_row = viewport_top.saturating_sub(1);
-        crossterm::execute!(backend, crossterm::cursor::MoveTo(0, write_row),)?;
-
-        for line in lines {
-            // \r\n at the bottom of the scroll region scrolls the region up by 1,
-            // leaving the cursor at the same row (now blank).
-            write!(backend, "\r\n")?;
-            write_spans(backend, &line.spans)?;
-        }
-
-        // Flush once after the whole batch; each line does not need its own
-        // syscall-boundary flush.
-        io::Write::flush(backend)?;
-
-        crossterm::execute!(backend, ResetScrollRegion)?;
-    }
+    let backend = terminal.backend_mut();
+    io::Write::write_all(backend, &batch)?;
+    io::Write::flush(backend)?;
 
     terminal.note_history_rows_inserted(lines.len() as u16);
 
@@ -232,5 +244,55 @@ fn color_ansi_bg(color: Color) -> String {
         Color::White => "107".into(),
         Color::Rgb(r, g, b) => format!("48;2;{};{};{}", r, g, b),
         Color::Indexed(i) => format!("48;5;{}", i),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str) -> Line<'static> {
+        Line::from(Span::styled(
+            text.to_string(),
+            Style::default().fg(Color::Red),
+        ))
+    }
+
+    #[test]
+    fn batch_scrolls_inside_a_bounded_region() {
+        let lines = [line("one"), line("two")];
+        let bytes = insert_batch_ansi(5, &lines).expect("render batch");
+        let text = String::from_utf8(bytes).expect("utf8 ansi");
+
+        assert!(
+            text.starts_with("\x1b[1;5r"),
+            "scroll region up to the viewport: {text:?}"
+        );
+        assert!(
+            text.contains("\x1b[5;1H"),
+            "cursor on last scroll row: {text:?}"
+        );
+        assert_eq!(
+            text.matches("\r\n").count(),
+            2,
+            "one CRLF per line: {text:?}"
+        );
+        assert!(text.ends_with("\x1b[r"), "scroll region reset: {text:?}");
+        assert!(text.contains("one") && text.contains("two"), "{text:?}");
+        assert!(text.contains("\x1b[0;31m"), "level color kept: {text:?}");
+    }
+
+    #[test]
+    fn batch_without_scroll_room_overwrites_from_the_top() {
+        let bytes = insert_batch_ansi(0, &[line("only")]).expect("render batch");
+        let text = String::from_utf8(bytes).expect("utf8 ansi");
+
+        assert!(
+            text.starts_with("\x1b[1;1H"),
+            "starts at the first row: {text:?}"
+        );
+        assert!(!text.contains("\r\n"), "no scroll trick: {text:?}");
+        assert!(!text.contains("\x1b[1;5r"), "no scroll region: {text:?}");
+        assert!(text.contains("only"), "{text:?}");
     }
 }

@@ -8,7 +8,7 @@ These templates are ready to copy into the matching community repositories:
 | `scoop/tlog.json` | Scoop (Windows) | Add to a Scoop bucket manifest |
 | `aur/PKGBUILD` | Arch Linux (AUR) | Submit as `tlog-bin` |
 
-Each template pins version `1.4.1` and points at the standard archive names
+Each template pins version `1.4.2` and points at the standard archive names
 created by `.github/workflows/release.yml`:
 
 - `tlog-x86_64-unknown-linux-gnu.tar.gz`

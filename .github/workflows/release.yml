@@ -76,7 +76,7 @@ jobs:
             chmod +x "${{ matrix.legacy_asset }}"
             tar -czf "${{ matrix.archive_asset }}" -C "target/${{ matrix.target }}/release" "${{ matrix.raw_asset }}"
           fi
-          python scripts/checksums.py "${{ matrix.legacy_asset }}" "${{ matrix.archive_asset }}" > SHA256SUMS
+          python scripts/checksums.py "${{ matrix.legacy_asset }}" "${{ matrix.archive_asset }}" > "SHA256SUMS.${{ matrix.target }}"
         env:
           RAW_ASSET: target/${{ matrix.target }}/release/${{ matrix.raw_asset }}
           ARCHIVE_ASSET: ${{ matrix.archive_asset }}
@@ -88,7 +88,7 @@ jobs:
           path: |
             ${{ matrix.legacy_asset }}
             ${{ matrix.archive_asset }}
-            SHA256SUMS
+            SHA256SUMS.${{ matrix.target }}
 
   release:
     name: Create GitHub Release
@@ -106,7 +106,18 @@ jobs:
       - name: Display downloaded files
         run: ls -R artifacts
 
+      # Each matrix job uploads `SHA256SUMS.<target>` (release assets must have
+      # unique basenames), so the tagged release gets one aggregated file.
+      - name: Aggregate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat artifacts/*/SHA256SUMS.* | LC_ALL=C sort > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*
+            SHA256SUMS

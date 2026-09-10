@@ -104,7 +104,7 @@ const MAX_TAG_BYTES: usize = 256;
 const MAX_MSG_BYTES: usize = 4096;
 
 /// Trim a string to at most `max_bytes` bytes on a valid UTF-8 char boundary.
-fn truncate_to_boundary(s: &str, max_bytes: usize) -> &str {
+pub(crate) fn truncate_to_boundary(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
