@@ -2,10 +2,31 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use tokio::sync::mpsc;
 
 use crate::buffer::LogBuffer;
 use crate::filter::{self, Expr};
 use crate::logcat::Message;
+
+/// Capacity of the feed→UI message channel. Sized to absorb short log bursts
+/// while bounding the worst-case amount of queued entries.
+pub const MSG_CHANNEL_CAPACITY: usize = 8192;
+
+/// Maximum messages dispatched per event-loop iteration. Draining in batches
+/// amortizes one scrollback insert and one viewport draw over a whole burst
+/// instead of paying both per line.
+pub const MSG_DRAIN_BATCH: usize = 512;
+
+/// Outcome of one burst-drain pass over the feed channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedDrain {
+    /// The channel may still have messages; keep polling.
+    Continue,
+    /// The feed is gone and will not reconnect; stop polling the channel.
+    Closed,
+    /// The UI must exit (`--exit-on-eof`, or offline playback reached EOF).
+    Exit,
+}
 
 /// Maximum number of applied filter expressions kept for Up/Down history.
 const MAX_FILTER_HISTORY: usize = 100;
@@ -264,6 +285,56 @@ impl App {
             }
         }
         true
+    }
+
+    /// Dispatch up to `batch` queued feed messages, starting with `first`.
+    ///
+    /// `first` is the message already received by the event loop's `select!`;
+    /// `None` means the channel closed. Consuming a whole burst in one pass
+    /// lets the caller write one scrollback batch and draw one frame for it,
+    /// instead of paying a flush and a draw per log line.
+    ///
+    /// Messages are dispatched in channel order. `exit_on_eof` is the CLI/offline
+    /// flag; it only takes effect when the message is `LogcatDied`.
+    pub fn drain_feed(
+        &mut self,
+        rx: &mut mpsc::Receiver<Message>,
+        first: Option<Message>,
+        batch: usize,
+        exit_on_eof: bool,
+        reconnect: bool,
+    ) -> FeedDrain {
+        let mut next = first;
+        let mut drained = 0usize;
+        loop {
+            match next {
+                Some(message) => {
+                    let feed_died = matches!(message, Message::LogcatDied);
+                    self.dispatch(message);
+                    if feed_died {
+                        if exit_on_eof {
+                            return FeedDrain::Exit;
+                        }
+                        if !reconnect {
+                            return FeedDrain::Closed;
+                        }
+                    }
+                }
+                None => {
+                    self.running = false;
+                    return FeedDrain::Closed;
+                }
+            }
+            drained += 1;
+            if drained >= batch {
+                return FeedDrain::Continue;
+            }
+            next = match rx.try_recv() {
+                Ok(message) => Some(message),
+                Err(mpsc::error::TryRecvError::Empty) => return FeedDrain::Continue,
+                Err(mpsc::error::TryRecvError::Disconnected) => None,
+            };
+        }
     }
 
     /// Merge a `adb shell ps` seed map and backfill buffered entries.
@@ -1065,5 +1136,101 @@ mod tests {
         app.dispatch(Message::NewEntry(entry("Keep", "three")));
         assert_eq!(app.buffer.len(), 2);
         assert_eq!(app.pending_log_lines.len(), 1);
+    }
+
+    #[test]
+    fn test_drain_feed_dispatches_a_burst_in_channel_order() {
+        use crate::logcat::{LogEntry, LogLevel};
+
+        fn entry(message: &str) -> LogEntry {
+            LogEntry {
+                timestamp: chrono::NaiveDateTime::parse_from_str(
+                    "2024-07-27 10:15:30.123",
+                    "%Y-%m-%d %H:%M:%S%.3f",
+                )
+                .expect("fixed timestamp"),
+                pid: 1234,
+                tid: 5678,
+                level: LogLevel::Info,
+                tag: "Burst".to_string(),
+                message: message.to_string(),
+                package: None,
+            }
+        }
+
+        let (tx, mut rx) = mpsc::channel::<Message>(16);
+        for text in ["one", "two", "three", "four"] {
+            tx.try_send(Message::NewEntry(entry(text)))
+                .expect("burst must fit the channel");
+        }
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+
+        // The batch cap bounds one pass even when more messages are queued.
+        let first = rx.try_recv().ok();
+        assert_eq!(
+            app.drain_feed(&mut rx, first, 2, false, false),
+            FeedDrain::Continue
+        );
+        assert_eq!(app.buffer.len(), 2);
+        assert_eq!(app.pending_log_lines.len(), 2);
+
+        let first = rx.try_recv().ok();
+        assert_eq!(
+            app.drain_feed(&mut rx, first, MSG_DRAIN_BATCH, false, false),
+            FeedDrain::Continue
+        );
+        assert_eq!(app.buffer.len(), 4);
+        assert_eq!(app.pending_log_lines.len(), 4);
+
+        let messages: Vec<&str> = (0..app.buffer.filtered_len())
+            .filter_map(|pos| {
+                app.buffer
+                    .get_filtered(pos)
+                    .map(|(_, entry)| entry.message.as_str())
+            })
+            .collect();
+        assert_eq!(messages, ["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn test_drain_feed_reports_exit_and_closed() {
+        let mut app = App::new_for_tests(crate::i18n::Lang::En);
+
+        // `LogcatDied` with EOF exit semantics stops the UI loop.
+        let (tx, mut rx) = mpsc::channel::<Message>(4);
+        tx.try_send(Message::LogcatDied).expect("queued");
+        let first = rx.try_recv().ok();
+        assert_eq!(
+            app.drain_feed(&mut rx, first, MSG_DRAIN_BATCH, true, false),
+            FeedDrain::Exit
+        );
+
+        // Without reconnect the channel is abandoned so the loop stops polling.
+        let (tx, mut rx) = mpsc::channel::<Message>(4);
+        tx.try_send(Message::LogcatDied).expect("queued");
+        let first = rx.try_recv().ok();
+        assert_eq!(
+            app.drain_feed(&mut rx, first, MSG_DRAIN_BATCH, false, false),
+            FeedDrain::Closed
+        );
+
+        // With reconnect the loop keeps polling for the restarted stream.
+        let (tx, mut rx) = mpsc::channel::<Message>(4);
+        tx.try_send(Message::LogcatDied).expect("queued");
+        let first = rx.try_recv().ok();
+        assert_eq!(
+            app.drain_feed(&mut rx, first, MSG_DRAIN_BATCH, false, true),
+            FeedDrain::Continue
+        );
+
+        // A disconnected channel reports `Closed` and marks the feed stopped.
+        let (tx, mut rx) = mpsc::channel::<Message>(4);
+        drop(tx);
+        let first = rx.try_recv().ok();
+        assert_eq!(
+            app.drain_feed(&mut rx, first, MSG_DRAIN_BATCH, false, true),
+            FeedDrain::Closed
+        );
+        assert!(!app.running);
     }
 }

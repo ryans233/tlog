@@ -48,13 +48,13 @@ tlog 是一个用 Rust 编写的 Android Logcat TUI 查看器，解析 `adb logc
 | `src/named_filters.rs` | 命名过滤器持久化：`<config-dir>/tlog/filters.conf`，每行 `name<TAB>expr`，容错加载 |
 | `src/export.rs` | `E` 导出当前过滤视图：`tlog-export-<时间戳>.log`，规范 threadtime 格式，不覆盖已有文件 |
 | `src/buffer.rs` | `LogBuffer` 环形缓冲区（100k 上限）+ `filtered: Vec<usize>` 零拷贝过滤视图 |
-| `src/app.rs` | `App` 全局状态、`DisplayConfig`、`Focus`（LogView/FilterInput/SearchInput/FilterName）、`SettingsCategory`、`dispatch`、过滤器应用/旁路、搜索/命名过滤器/历史/快速等级逻辑、显示与颜色设置保存 |
+| `src/app.rs` | `App` 全局状态、`DisplayConfig`、`Focus`（LogView/FilterInput/SearchInput/FilterName）、`SettingsCategory`、`dispatch`、`drain_feed`（每轮批量消费 feed 通道，`MSG_CHANNEL_CAPACITY` / `MSG_DRAIN_BATCH`）、过滤器应用/旁路、搜索/命名过滤器/历史/快速等级逻辑、显示与颜色设置保存 |
 | `src/config.rs` | 调色板 `ColorPalette`、预设 `Preset`、颜色项 `ColorItem`、hex 转换、`config.conf` 路径与读写 |
 | `src/ui.rs` | 底部视口渲染（过滤器栏 + 状态）、`format_entry` 日志行格式化与搜索高亮、帮助/设置 overlay 渲染 |
 | `src/i18n.rs` | `Lang` 检测、`Messages` 结构体与 `EN` / `ZH` 两个常量实例、占位符方法 |
 | `src/scrollback.rs` | `DECSTBM` 滚动区域命令、`insert_log_lines` 将日志写入视口上方的终端原生 scrollback、`write_spans` ANSI 样式输出 |
 | `src/viewport.rs` | `ViewportTerminal` / `ViewportFrame`：不使用备用屏（alternate screen）的 ratatui 终端，在屏幕底部固定区域做 diff 渲染 |
-| `benches/replay.rs` | 无 lib.rs 的回归基准（通过 `#[path]` 引入源码模块）：100k push/驱逐、过滤重建、10k 回放格式化（普通/搜索高亮），`--quick` 供 CI 冒烟 |
+| `benches/replay.rs` | 无 lib.rs 的回归基准（通过 `#[path]` 引入源码模块）：100k push/驱逐、过滤重建、10k 回放格式化（普通/搜索高亮）、突发摄取（逐行 vs 批量 drain，对比 msg/s），`--quick` 供 CI 冒烟 |
 
 ### 3.2 数据流
 
@@ -62,7 +62,7 @@ tlog 是一个用 Rust 编写的 Android Logcat TUI 查看器，解析 `adb logc
 2. **运行循环**（`run_app`）：`tokio::select!` 五路并发：
    - crossterm `EventStream` 键盘/Resize 事件 → `handle_key`；Resize 先立即重新定位视口区域，再经 75ms 防抖后清屏重放；
    - 后台 `seed_pid_map` 任务（3 秒超时）完成后合并 PID→包名，并回填缓冲中缺失的包名（文件模式为空的占位任务）；
-   - `mpsc::channel(1024)` 收到 `Message` → `App::dispatch`；
+   - `mpsc::channel(MSG_CHANNEL_CAPACITY = 8192)` 收到 `Message` → `App::drain_feed` 每轮最多批量消费 `MSG_DRAIN_BATCH = 512` 条（新条目先入缓冲并攒进 `pending_log_lines`，整批只写一次 scrollback）；
    - 250ms `ticker` → `App::dispatch(Message::Tick)`；
    - resize 防抖 `Sleep`（75ms，合并窗口拖动风暴）。
    每轮循环后统一处理：`needs_replay` → 清空 `pending_log_lines` + 清屏 + 重置视口 + 建立 `ReplayState`；随后每轮最多格式化/写入 `REPLAY_CHUNK = 128` 行；`replay_state.is_none()` 且 `pending_log_lines` 非空 → `insert_log_lines`（回放期间新行暂存，保证时间顺序）；最后 `terminal.draw(ui::render_viewport)`。
@@ -79,7 +79,7 @@ tlog 是一个用 Rust 编写的 Android Logcat TUI 查看器，解析 `adb logc
 2. **时间戳无年份**：logcat 不输出年份；`parse_line` 按 `now` 的日期做 ±183 天推断，自动选择当年/上一年/下一年。修改阈值或候选年份时要同步更新 `logcat.rs` 的跨年测试。
 3. **字段截断**：tag ≤ 256 字节、message ≤ 4096 字节，且必须落在 UTF-8 字符边界（`truncate_to_boundary`）。
 4. **环形缓冲与索引失效**：`LogBuffer` 满（100,000）时先 `drain(0..EVICT_BATCH)`（20,000）并 `shrink_to_fit()`，然后**必须** `rebuild_filtered`，因为 `filtered` 存的是 `entries` 的索引，驱逐后索引全部失效。
-5. **有界通道 + try_send**：logcat 读取任务用 `try_send` 而非 `await`，保证实时性；channel 满时丢弃新日志而不是阻塞。不要在 logcat 读取任务里改成阻塞发送。唯一例外是 `--file` 离线回放（`run_file_feed`）用 `send().await` 做有界背压——文件不会持续产生新数据，丢行反而会破坏回放完整性。
+5. **有界通道 + try_send + 批量 drain**：logcat 读取任务用 `try_send` 而非 `await`，保证实时性；channel（`MSG_CHANNEL_CAPACITY = 8192`）满时丢弃新日志而不是阻塞。不要在 logcat 读取任务里改成阻塞发送。消费端由 `App::drain_feed` 每轮最多取 `MSG_DRAIN_BATCH = 512` 条，让一次 scrollback 写入与一帧绘制覆盖整批日志，而不是逐行各来一次；批内顺序必须保持 channel 顺序，`FeedDrain::{Exit, Closed}` 的退出/停止轮询语义不能丢。唯一例外是 `--file` 离线回放（`run_file_feed`）用 `send().await` 做有界背压——文件不会持续产生新数据，丢行反而会破坏回放完整性。
 6. **回放上限**：过滤变更 / resize / 清屏后只重放最新 10,000 条；不会全量重放历史。
 7. **`needs_replay` 与分段回放协议**：置位后由主循环统一执行：清空 `pending_log_lines` → `clear_scrollback_and_visible_screen_ansi` + `set_viewport_area` → `replay_state_for(filtered_len)` + 复位标志。之后每轮只处理 `next_replay_chunk_end` 界定的一个 `REPLAY_CHUNK = 128` 行块；`pending_log_lines` 在回放期间暂存，`replay_state` 清空后才能写入，否则新行会插到旧回放块中间破坏时间顺序。再次置位会丢弃当前进度并重新快照。新功能需要重绘 scrollback 时置 `needs_replay = true`，不要自行直接渲染。
 8. **无备用屏**：`ViewportTerminal` 工作在主屏幕缓冲区（不是 ratatui 默认的 alternate screen）。退出清理必须在 `main` 中执行 `restore_terminal` + `disable_raw_mode` + `"\x1b[r"`，否则终端画面与滚动区域会残留。
@@ -127,7 +127,7 @@ tlog 是一个用 Rust 编写的 Android Logcat TUI 查看器，解析 `adb logc
 - `src/buffer.rs`：push/get、push 返回过滤视图位置（过滤掉返回 `None`）、驱逐、clear、包名回填。
 - `src/config.rs`：hex 往返与非法输入、preset apply、save/load 往返、Custom 往返、缺失/部分配置。
 - `src/ui.rs`：`format_entry` 颜色与 `colorize=false`、搜索高亮 span、运行状态指示、help/settings 行数结构、`visible_filter_slice`（宽字符、零宽字符、光标跟随滚动、短输入全显）。
-- `src/app.rs`：过滤游标/UTF-8/退格删除、Ctrl+W 删词、历史导航与草稿恢复、历史上限、快速等级追加去重、搜索应用/清空/预填、命名过滤器空表达式拒绝、一次性提示 TTL 过期与 Tick 清理。
+- `src/app.rs`：过滤游标/UTF-8/退格删除、Ctrl+W 删词、历史导航与草稿恢复、历史上限、快速等级追加去重、搜索应用/清空/预填、命名过滤器空表达式拒绝、一次性提示 TTL 过期与 Tick 清理、`drain_feed` 批内顺序/批上限/`Exit`/`Closed`/断连停轮询。
 - `src/main.rs`：CLI 参数组装（serial/buffer/clear/EOF/`--file` 冲突）、重连退避、有界行读取、分段回放边界（`replay_state_for`/`next_replay_chunk_end`）、过滤器方向键/`Ctrl+A/E/W`/历史、搜索与命名过滤器输入模式、快速等级与导出键、命名过滤器持久化与 `name:` 解析、文件 feed 解析/打开失败、颜色编辑提交保存、预设循环保存、非法 hex 取消、显示开关持久化、`restore_terminal` ANSI 序列（含 DisableBracketedPaste）、启动时调色板重载。
 - `src/rejected.rs`：禁用时零写入、超长截断（含多字节字符不 panic）、1 MiB 轮转。
 - `src/scrollback.rs`：`insert_batch_ansi` 的滚动区域/逐行 CRLF/颜色 ANSI 字节、视口到顶时退化为覆盖前几行。

@@ -26,7 +26,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time;
 
-use app::{App, Focus};
+use app::{App, FeedDrain, Focus};
 use logcat::{Message, parse_line, parse_ps_line};
 use scrollback::insert_log_lines;
 use viewport::ViewportTerminal;
@@ -248,7 +248,7 @@ fn spawn_logcat_feed(
     reconnect: bool,
     rejected: rejected::RejectedLog,
 ) -> LogcatFeed {
-    let (tx, rx) = mpsc::channel::<Message>(1024);
+    let (tx, rx) = mpsc::channel::<Message>(app::MSG_CHANNEL_CAPACITY);
     let cmd = cmd.to_vec();
     let task = tokio::spawn(async move {
         run_logcat_feed(cmd, reconnect, rejected, tx).await;
@@ -318,7 +318,7 @@ fn process_log_line(
 
 /// Spawn an offline `--file` reader with the same message protocol as logcat.
 fn spawn_file_feed(path: PathBuf, rejected: rejected::RejectedLog) -> LogcatFeed {
-    let (tx, rx) = mpsc::channel::<Message>(1024);
+    let (tx, rx) = mpsc::channel::<Message>(app::MSG_CHANNEL_CAPACITY);
     let task = tokio::spawn(async move {
         run_file_feed(path, rejected, tx).await;
     });
@@ -677,27 +677,20 @@ async fn run_app(
                 }
             }
             msg = msg_rx.recv(), if !feed_closed => {
-                match msg {
-                    Some(Message::NewEntry(entry)) => {
-                        app.dispatch(Message::NewEntry(entry));
-                    }
-                    Some(message) => {
-                        let feed_died = matches!(message, Message::LogcatDied);
-                        let exit_on_eof = feed_died && (cli.exit_on_eof || file_mode);
-                        app.dispatch(message);
-                        if feed_died && !cli.reconnect {
-                            // Keep the UI open in STOPPED state without busy-polling
-                            // the closed channel.
-                            feed_closed = true;
-                        }
-                        if exit_on_eof {
-                            break Ok(());
-                        }
-                    }
-                    None => {
-                        feed_closed = true;
-                        app.running = false;
-                    }
+                // Drain up to `MSG_DRAIN_BATCH` messages per iteration: a burst
+                // then costs one scrollback insert and one draw per batch
+                // instead of per line, so the UI keeps up with log storms.
+                let exit_on_eof = cli.exit_on_eof || file_mode;
+                match app.drain_feed(
+                    &mut msg_rx,
+                    msg,
+                    app::MSG_DRAIN_BATCH,
+                    exit_on_eof,
+                    cli.reconnect,
+                ) {
+                    FeedDrain::Continue => {}
+                    FeedDrain::Closed => feed_closed = true,
+                    FeedDrain::Exit => break Ok(()),
                 }
             }
 

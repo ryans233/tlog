@@ -58,8 +58,9 @@ impl Command for ResetScrollRegion {
 /// overwrite the top rows instead.
 ///
 /// Kept separate from [`insert_log_lines`] so the emitted sequence can be
-/// asserted in tests without a real terminal.
-fn insert_batch_ansi(viewport_top: u16, lines: &[Line<'_>]) -> io::Result<Vec<u8>> {
+/// asserted in tests and measured by `benches/replay.rs` without a real
+/// terminal.
+pub(crate) fn insert_batch_ansi(viewport_top: u16, lines: &[Line<'_>]) -> io::Result<Vec<u8>> {
     let mut out: Vec<u8> = Vec::new();
 
     if viewport_top == 0 {

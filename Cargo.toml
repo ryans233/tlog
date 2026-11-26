@@ -1,6 +1,6 @@
 [package]
 name = "tlog"
-version = "1.4.2"
+version = "1.4.3"
 edition = "2024"
 description = "Android Logcat TUI viewer with inline terminal scrollback"
 license = "MIT"

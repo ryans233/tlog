@@ -217,6 +217,8 @@ name:errors              # Saved filter (created with Ctrl+S; quote names with `
   for CI demos and recordings.
 - Terminal resize bursts are debounced for 75 ms before the scrollback is
   cleared and replayed.
+- Log bursts are drained up to 512 messages per event-loop iteration, so one
+  scrollback write and one frame cover the whole batch instead of one per line.
 
 ## Architecture
 
@@ -243,7 +245,7 @@ name:errors              # Saved filter (created with Ctrl+S; quote names with `
 | Mechanism | Detail |
 |-----------|--------|
 | Ring buffer | 100,000 entries hard cap, evicts oldest 20,000 when full |
-| Bounded channel | `mpsc::channel(1024)`, drops on overflow instead of queuing |
+| Bounded channel | `mpsc::channel(8192)`, drops on overflow instead of queuing |
 | Message truncation | Single message ≤ 4096 bytes, tag ≤ 256 bytes |
 | Zero-copy view | `filtered: Vec<usize>` stores indices, formatting is done on-the-fly |
 | Periodic shrink | `shrink_to_fit()` after eviction |
@@ -259,8 +261,9 @@ cargo bench --bench replay          # normal run
 cargo bench --bench replay -- --quick  # one iteration (used by CI)
 ```
 
-The benchmark fixture covers 100k-entry pushes, eviction, filter rebuilds, and
-10k-entry replay formatting (plain and search-highlighted).
+The benchmark fixture covers 100k-entry pushes, eviction, filter rebuilds,
+10k-entry replay formatting (plain and search-highlighted), and burst ingest
+(per-line versus batched channel draining).
 
 ## Tech stack
 

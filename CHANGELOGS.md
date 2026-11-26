@@ -2,6 +2,17 @@
 
 All notable changes to tlog are documented in this file.
 
+## [1.4.3] - 2026-11-27
+
+### Performance
+- Log bursts are now ingested in batches: the event loop drains up to 512
+  channel messages per iteration, so one scrollback write and one frame draw
+  cover a whole batch instead of one per line. The feed channel capacity grew
+  from 1024 to 8192 to absorb short storms, raising the throughput ceiling
+  before `dropped` accounting starts.
+- `benches/replay.rs` gained a burst-ingest scenario comparing per-line versus
+  batched draining (messages/second).
+
 ## [1.4.2] - 2026-09-10
 
 ### Added
